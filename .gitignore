@@ -1,0 +1,9 @@
+.env
+data_runtime/
+__pycache__/
+*.pyc
+.venv/
+venv/
+bot_stderr.log
+backtest/data/BTCUSDT_1m_*.csv
+backtest/data/trades_*.csv

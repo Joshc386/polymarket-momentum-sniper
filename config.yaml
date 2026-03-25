@@ -1,0 +1,62 @@
+mode: paper  # paper | live
+
+market:
+  asset: btc
+  period: 5m
+
+signals:
+  oracle_lag:
+    max_expected_lag: 0.001
+    weight_early: 0.35
+    weight_late: 0.25
+  momentum:
+    roc_weight: 0.30
+    direction_weight: 0.25
+    volume_weight: 0.25
+    body_ratio_weight: 0.10
+    rsi_weight: 0.10
+    rsi_period: 5
+    lookback_candles: 10
+    weight_early: 0.40
+    weight_late: 0.65
+  liquidation:
+    weight_early: 0.25
+    weight_late: 0.10
+    refresh_interval_sec: 60
+  max_adjustment: 0.15
+
+entry:
+  min_edge: 0.02
+  max_edge: 0.10
+  fee_adjustment: 0.01
+  gtc_timeout_sec: 10
+  fok_slippage: 0.005
+
+sizing:
+  kelly_multiplier: 0.25
+  min_bet_usdc: 1.0
+  max_bet_usdc: 5.0
+  initial_bankroll: 100.0
+
+risk:
+  daily_loss_cap_pct: 0.20
+  min_bankroll: 10.0
+  streak_reduce_at: 3
+  streak_reduce_factor: 0.5
+  streak_pause_at: 7
+  streak_pause_minutes: 30
+  streak_reset_wins: 3
+  low_volatility_threshold: 0.0001
+  high_volatility_threshold: 0.02
+  high_volatility_size_factor: 0.5
+
+telegram:
+  enabled: true
+  notify_every_trade: true
+  notify_daily_summary: true
+  paper_prefix: "[PAPER] "
+
+logging:
+  db_path: ./data_runtime/trades.db
+  signal_log_path: ./data_runtime/signals.csv
+  log_level: INFO
