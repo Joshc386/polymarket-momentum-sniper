@@ -31,6 +31,8 @@ from signals.combiner import SignalCombiner
 from strategy.entry_logic import EntryLogic, EntryDecision
 from strategy.sizing import PositionSizer
 from strategy.risk_manager import RiskManager
+from strategy.regime_detector import RegimeDetector, Regime
+from strategy.event_calendar import EventCalendar
 from logging_db.database import Database
 
 logger = logging.getLogger(__name__)
@@ -63,9 +65,12 @@ class BacktestConfig:
 
     # Risk
     daily_loss_cap_pct: float = 0.20
+    daily_loss_warn_pct: float = 0.15
     min_bankroll: float = 10.0
     streak_reduce_at: int = 3
-    streak_reduce_factor: float = 0.5
+    streak_reduce_factor: float = 0.75
+    streak_heavy_reduce_at: int = 5
+    streak_heavy_reduce_factor: float = 0.5
     streak_pause_at: int = 7
     streak_pause_minutes: int = 30
     streak_reset_wins: int = 3
@@ -126,6 +131,7 @@ class WindowResult:
     est_prob_up: float = 0.5
     won: bool = False
     fill_failed: bool = False
+    regime: str = ""
 
 
 @dataclass
@@ -469,9 +475,12 @@ class ReplayEngine:
 
         self.risk_mgr = RiskManager(
             daily_loss_cap_pct=config.daily_loss_cap_pct,
+            daily_loss_warn_pct=config.daily_loss_warn_pct,
             min_bankroll=config.min_bankroll,
             streak_reduce_at=config.streak_reduce_at,
             streak_reduce_factor=config.streak_reduce_factor,
+            streak_heavy_reduce_at=config.streak_heavy_reduce_at,
+            streak_heavy_reduce_factor=config.streak_heavy_reduce_factor,
             streak_pause_at=config.streak_pause_at,
             streak_pause_minutes=config.streak_pause_minutes,
             streak_reset_wins=config.streak_reset_wins,
@@ -483,6 +492,10 @@ class ReplayEngine:
                 self._sim_time_ms / 1000.0, tz=timezone.utc
             ).strftime("%Y-%m-%d"),
         )
+
+        # Regime detection + event calendar
+        self.regime_detector = RegimeDetector()
+        self.event_calendar = EventCalendar(buffer_minutes=15)
 
         # Realistic simulators
         self.oracle_sim = OracleSimulator(self.rng, config)
@@ -605,7 +618,12 @@ class ReplayEngine:
                     num_ask_levels=ob_full["num_ask_levels"],
                 )
 
-                # ── Combine all signals ──
+                # ── Regime detection ──
+                regime_state = self.regime_detector.detect(candle_history)
+                regime_params = self.regime_detector.get_params(regime_state.regime)
+                window_result.regime = regime_state.label
+
+                # ── Combine all signals (with regime weight adjustments) ──
                 raw_signal, est_prob_up = self.combiner.combine(
                     oracle_lag_signal=oracle_lag_val,
                     momentum_signal=momentum_val,
@@ -613,10 +631,26 @@ class ReplayEngine:
                     seconds_remaining=secs_remaining,
                     coinbase_direction=0.0,
                     orderbook_signal=ob_signal_val,
+                    regime_weight_adjustments=regime_params.get("weight_adjustments"),
                 )
 
+                # ── Event calendar check ──
+                candle_ts = candle.open_time / 1000.0
+                event_blocked, _, _ = self.event_calendar.is_event_window(candle_ts)
+
+                # ── Block trading in low-vol regime or during events ──
+                effective_can_trade = risk_state.can_trade
+                if regime_state.regime == Regime.LOW_VOLATILITY:
+                    effective_can_trade = False
+                if event_blocked:
+                    effective_can_trade = False
+
+                # Apply regime size multiplier to risk state
+                regime_size_mult = regime_params.get("size_multiplier", 1.0)
+                regime_edge_mult = regime_params.get("edge_multiplier", 1.0)
+
                 # ── Entry evaluation ──
-                if risk_state.can_trade and not trade_placed:
+                if effective_can_trade and not trade_placed:
                     decision = self.entry_logic.evaluate(
                         est_prob_up=est_prob_up,
                         yes_best_ask=yba,
@@ -625,6 +659,7 @@ class ReplayEngine:
                         no_best_bid=nbb,
                         seconds_remaining=secs_remaining,
                         has_position=trade_placed,
+                        regime_edge_multiplier=regime_edge_mult,
                     )
 
                     if decision.should_enter:
@@ -633,7 +668,7 @@ class ReplayEngine:
                             est_prob=win_prob,
                             share_price=decision.price,
                             bankroll=bankroll,
-                            size_multiplier=risk_state.size_multiplier,
+                            size_multiplier=risk_state.size_multiplier * regime_size_mult,
                         )
 
                         if bet_size > 0:

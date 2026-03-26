@@ -28,9 +28,12 @@ class RiskManager:
     def __init__(
         self,
         daily_loss_cap_pct: float = 0.20,
+        daily_loss_warn_pct: float = 0.15,
         min_bankroll: float = 10.0,
         streak_reduce_at: int = 3,
-        streak_reduce_factor: float = 0.5,
+        streak_reduce_factor: float = 0.75,
+        streak_heavy_reduce_at: int = 5,
+        streak_heavy_reduce_factor: float = 0.5,
         streak_pause_at: int = 7,
         streak_pause_minutes: int = 30,
         streak_reset_wins: int = 3,
@@ -41,9 +44,12 @@ class RiskManager:
         date_func: callable = None,
     ):
         self.daily_loss_cap_pct = daily_loss_cap_pct
+        self.daily_loss_warn_pct = daily_loss_warn_pct
         self.min_bankroll = min_bankroll
         self.streak_reduce_at = streak_reduce_at
         self.streak_reduce_factor = streak_reduce_factor
+        self.streak_heavy_reduce_at = streak_heavy_reduce_at
+        self.streak_heavy_reduce_factor = streak_heavy_reduce_factor
         self.streak_pause_at = streak_pause_at
         self.streak_pause_minutes = streak_pause_minutes
         self.streak_reset_wins = streak_reset_wins
@@ -132,7 +138,7 @@ class RiskManager:
             state.reason = f"Bankroll ${bankroll:.2f} below minimum ${self.min_bankroll:.2f}"
             return state
 
-        # Check daily loss cap
+        # Check daily loss cap (hard stop at 20%)
         if self.daily_start_bankroll > 0:
             loss_cap = self.daily_start_bankroll * self.daily_loss_cap_pct
             if self.daily_pnl < -loss_cap:
@@ -144,21 +150,34 @@ class RiskManager:
         if self.paused_until > 0 and self._now() < self.paused_until:
             remaining = int(self.paused_until - self._now())
             state.can_trade = False
-            state.reason = f"Streak pause — {remaining}s remaining"
+            state.reason = f"Streak pause -- {remaining}s remaining"
             return state
 
-        # Streak pause just expired — reset and resume at normal size
+        # Streak pause just expired — reset fully and resume at normal size
         if self._streak_was_paused and self.paused_until > 0 and self._now() >= self.paused_until:
-            logger.info("Streak pause served — resetting consecutive losses")
+            logger.info("Streak pause served — resetting to full trading")
             self.consecutive_losses = 0
+            self.consecutive_wins = 0
             self._streak_was_paused = False
             self.paused_until = 0.0
             state.consecutive_losses = 0
+            state.consecutive_wins = 0
+            state.paused_until = 0.0
 
-        # Size multiplier from streak (capped at 0.5x minimum)
+        # Graduated size multiplier from streak
         multiplier = 1.0
-        if self.consecutive_losses >= self.streak_reduce_at:
-            multiplier = self.streak_reduce_factor  # 0.5x
+        if self.consecutive_losses >= self.streak_heavy_reduce_at:
+            multiplier = self.streak_heavy_reduce_factor  # 0.5x at 5+ losses
+        elif self.consecutive_losses >= self.streak_reduce_at:
+            multiplier = self.streak_reduce_factor  # 0.75x at 3-4 losses
+
+        # Soft daily loss warning (reduce size at 15%, hard stop at 20%)
+        _daily_warn_active = False
+        if self.daily_start_bankroll > 0:
+            warn_cap = self.daily_start_bankroll * self.daily_loss_warn_pct
+            if self.daily_pnl < -warn_cap:
+                multiplier *= 0.5
+                _daily_warn_active = True
 
         # Volatility filter
         if recent_volatility > 0:
@@ -169,15 +188,19 @@ class RiskManager:
             elif recent_volatility > self.high_vol_threshold:
                 multiplier *= self.high_vol_size_factor
 
-        # Floor: never go below 0.5x
-        multiplier = max(0.5, multiplier)
+        # Floor: never go below 0.25x (allow tiny bets to recover)
+        multiplier = max(0.25, multiplier)
 
         state.size_multiplier = multiplier
         state.can_trade = True
         if multiplier < 1.0:
             reasons = []
-            if self.consecutive_losses >= self.streak_reduce_at:
+            if self.consecutive_losses >= self.streak_heavy_reduce_at:
+                reasons.append(f"{self.consecutive_losses} losses (heavy)")
+            elif self.consecutive_losses >= self.streak_reduce_at:
                 reasons.append(f"{self.consecutive_losses} losses")
+            if _daily_warn_active:
+                reasons.append("daily loss warning")
             if recent_volatility > self.high_vol_threshold:
                 reasons.append("high vol")
             state.reason = f"Reduced size ({multiplier:.2f}x): {', '.join(reasons)}"

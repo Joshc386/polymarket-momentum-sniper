@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Polymarket Momentum Sniper Bot — Phase 7: Optimised"""
+"""Polymarket Momentum Sniper Bot — Phase 10: Regime Detection + Event Calendar"""
 
 import asyncio
 import logging
@@ -26,13 +26,18 @@ from signals.oracle_lag import OracleLagSignal
 from signals.momentum import MomentumSignal
 from signals.liquidation import LiquidationSignal
 from signals.orderbook_signal import OrderbookSignal
+from signals.sentiment_signal import SentimentSignal
 from signals.combiner import SignalCombiner
 from data.coinglass_scraper import CoinGlassScraper
 from data.coinbase_feed import CoinbaseFeed
+from data.coinalyze_feed import CoinalyzeFeed
+from data.binance_liquidations import BinanceLiquidationFeed
 from core.health_monitor import HealthMonitor
 from strategy.entry_logic import EntryLogic, EntryDecision
 from strategy.sizing import PositionSizer
 from strategy.risk_manager import RiskManager
+from strategy.regime_detector import RegimeDetector, Regime
+from strategy.event_calendar import EventCalendar
 from notifications.telegram import TelegramNotifier
 from logging_db.database import Database
 
@@ -80,9 +85,9 @@ def _bar(val: float, w: int = 16) -> str:
 def render_dashboard(
     config, binance, oracle, coinbase, market, orderbook, db,
     poly_connected, executor, risk_mgr, risk_state, health,
-    oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, raw_signal, est_prob_up,
+    oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, sentiment_val, raw_signal, est_prob_up,
     weights, entry_decision, last_trade_msg, coinglass_status="",
-    coinbase_dir=0.0,
+    coinbase_dir=0.0, coinalyze_status="", regime_state=None, event_status="",
 ):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     L = []
@@ -141,7 +146,7 @@ def render_dashboard(
 
     # ── Signals ──
     L.append(f"  {MAGENTA}-- Signals --{RESET}")
-    w1, w2, w3, w4 = weights
+    w1, w2, w3, w4, w5 = weights
     L.append(
         f"  L1 Oracle:  {_sc(oracle_lag_val)}{oracle_lag_val:+.3f}{RESET} [{_bar(oracle_lag_val)}] "
         f"L2 Mom: {_sc(momentum_val)}{momentum_val:+.3f}{RESET} [{_bar(momentum_val)}]"
@@ -155,10 +160,15 @@ def render_dashboard(
         f"  L4 Book:    {_sc(ob_signal_val)}{ob_signal_val:+.3f}{RESET} [{_bar(ob_signal_val)}] "
         f"{DIM}Polymarket CLOB{RESET}"
     )
+    ca_status = coinalyze_status if coinalyze_status else ""
+    L.append(
+        f"  L5 Sent:    {_sc(sentiment_val)}{sentiment_val:+.3f}{RESET} [{_bar(sentiment_val)}] "
+        f"{DIM}{ca_status}{RESET}"
+    )
     rc = _sc(raw_signal)
     L.append(
         f"  Combined:   {rc}{raw_signal:+.3f}{RESET} [{_bar(raw_signal)}]  "
-        f"{DIM}w=[{w1:.2f},{w2:.2f},{w3:.2f},{w4:.2f}]{RESET}"
+        f"{DIM}w=[{w1:.2f},{w2:.2f},{w3:.2f},{w4:.2f},{w5:.2f}]{RESET}"
     )
 
     ob = orderbook.last_summary
@@ -169,6 +179,21 @@ def render_dashboard(
         f"  P(Up): {pc}{est_prob_up:.1%}{RESET}  Mkt: {mp:.1%}  "
         f"Edge: {BOLD}{edge:+.1%}{RESET}"
     )
+
+    # ── Regime + Events ──
+    if regime_state:
+        regime_colors = {
+            "trending_up": GREEN, "trending_down": RED,
+            "ranging": YELLOW, "high_vol": RED, "low_vol": DIM,
+        }
+        rc = regime_colors.get(regime_state.label, DIM)
+        L.append(
+            f"  Regime: {rc}{regime_state.label.upper()}{RESET} "
+            f"(conf={regime_state.confidence:.2f} trend={regime_state.trend_strength:.2f} "
+            f"vol={regime_state.volatility_pct:.2f} chop={regime_state.choppiness:.2f})"
+        )
+    if event_status:
+        L.append(f"  {DIM}Events: {event_status}{RESET}")
 
     # ── Entry / Risk ──
     L.append(f"  {MAGENTA}-- Trading --{RESET}")
@@ -272,17 +297,30 @@ async def main():
         lookback_candles=config.momentum_lookback_candles,
     )
     ob_signal = OrderbookSignal()
+    sent_signal = SentimentSignal()
     combiner = SignalCombiner(max_adjustment=config.max_adjustment)
 
     # Liquidation layer
     coinglass = CoinGlassScraper(refresh_interval=config.liquidation_refresh_interval_sec)
     liq_signal = LiquidationSignal()
 
+    # Coinalyze cross-exchange sentiment
+    coinalyze = CoinalyzeFeed(
+        refresh_interval=60,
+        api_key=config.coinalyze_api_key,
+    )
+
+    # Real-time Binance liquidation stream
+    binance_liqs = BinanceLiquidationFeed(window_seconds=300.0)
+
     # Strategy
     entry_logic = EntryLogic(
         min_edge=config.min_edge,
         max_edge=config.max_edge,
         fee_adjustment=config.fee_adjustment,
+        min_confidence=config.min_confidence,
+        preferred_entry_secs=config.preferred_entry_secs,
+        latest_entry_secs=config.latest_entry_secs,
     )
     sizer = PositionSizer(
         kelly_multiplier=config.kelly_multiplier,
@@ -291,9 +329,12 @@ async def main():
     )
     risk_mgr = RiskManager(
         daily_loss_cap_pct=config.daily_loss_cap_pct,
+        daily_loss_warn_pct=config.daily_loss_warn_pct,
         min_bankroll=config.min_bankroll,
         streak_reduce_at=config.streak_reduce_at,
         streak_reduce_factor=config.streak_reduce_factor,
+        streak_heavy_reduce_at=config.streak_heavy_reduce_at,
+        streak_heavy_reduce_factor=config.streak_heavy_reduce_factor,
         streak_pause_at=config.streak_pause_at,
         streak_pause_minutes=config.streak_pause_minutes,
         streak_reset_wins=config.streak_reset_wins,
@@ -301,6 +342,10 @@ async def main():
         high_volatility_threshold=config.high_volatility_threshold,
         high_volatility_size_factor=config.high_volatility_size_factor,
     )
+
+    # Regime detection + Event calendar
+    regime_detector = RegimeDetector()
+    event_calendar = EventCalendar(buffer_minutes=15)
 
     # Execution — select engine based on mode
     is_live = config.mode == "live"
@@ -360,6 +405,8 @@ async def main():
     coinglass_task = asyncio.create_task(
         coinglass.start(current_price_getter=lambda: binance.price)
     )
+    coinalyze_task = asyncio.create_task(coinalyze.start())
+    binance_liq_task = asyncio.create_task(binance_liqs.start())
 
     logger.info("Waiting for data feeds...")
     for _ in range(50):
@@ -380,13 +427,16 @@ async def main():
     momentum_val = 0.0
     liquidation_val = 0.0
     ob_signal_val = 0.0
+    sentiment_val = 0.0
     coinbase_dir = 0.0
     raw_signal_val = 0.0
     est_prob_up = 0.5
-    current_weights = (0.0, 0.0, 0.0, 0.0)
+    current_weights = (0.0, 0.0, 0.0, 0.0, 0.0)
     entry_decision = EntryDecision()
     risk_state = None
     last_trade_msg = ""
+    current_regime = None
+    regime_params = {}
 
     try:
         while not shutdown_event.is_set():
@@ -433,6 +483,7 @@ async def main():
                 last_window_slug = mkt.slug
                 has_position_this_window = False
                 ob_signal.reset()  # Reset L4 history for new window
+                binance_liqs.reset()  # Reset live liq stats for new window
                 if oracle.price > 0:
                     oracle.set_window_open_price()
                 else:
@@ -460,6 +511,10 @@ async def main():
                 health.update_feed("market_discovery")
             if coinglass.data.is_valid:
                 health.update_feed("coinglass")
+            if coinalyze.snapshot.is_valid:
+                health.update_feed("coinalyze")
+            if binance_liqs.is_connected:
+                health.update_feed("binance_liqs")
 
             # Send health alerts
             for alert in health.get_alerts():
@@ -478,11 +533,12 @@ async def main():
                     candles=binance.candles,
                     current_candle=binance.current_candle,
                 )
-                # Layer 3: Liquidation
+                # Layer 3: Liquidation (CoinGlass levels + Binance live stream)
                 liquidation_val = liq_signal.compute(
                     current_price=binance.price,
                     liq_data=coinglass.data,
                     price_momentum=momentum_val,
+                    live_stats=binance_liqs.stats,
                 )
                 # Coinbase cross-confirmation
                 coinbase_dir = coinbase.price_direction if coinbase.is_connected else 0.0
@@ -511,6 +567,19 @@ async def main():
                 else:
                     ob_signal_val = 0.0
 
+                # Layer 5: Cross-exchange sentiment (Coinalyze)
+                if coinalyze.snapshot.is_valid:
+                    sentiment_val = sent_signal.compute(
+                        snapshot=coinalyze.snapshot,
+                        price_momentum=momentum_val,
+                    )
+                else:
+                    sentiment_val = 0.0
+
+                # Regime detection
+                current_regime = regime_detector.detect(binance.candles)
+                regime_params = regime_detector.get_params(current_regime.regime)
+
                 current_weights = combiner.get_weights(secs_remaining)
                 raw_signal_val, est_prob_up = combiner.combine(
                     oracle_lag_signal=oracle_lag_val,
@@ -519,6 +588,8 @@ async def main():
                     seconds_remaining=secs_remaining,
                     coinbase_direction=coinbase_dir,
                     orderbook_signal=ob_signal_val,
+                    sentiment_signal=sentiment_val,
+                    regime_weight_adjustments=regime_params.get("weight_adjustments"),
                 )
 
                 # Check if critical feeds are healthy before trading
@@ -535,8 +606,24 @@ async def main():
                     risk_state.can_trade = False
                     risk_state.reason = risk_state_override
 
+                # Event calendar check — block trading around FOMC, CPI, etc.
+                event_blocked, event_name, event_minutes = event_calendar.is_event_window()
+                if event_blocked and risk_state.can_trade:
+                    risk_state.can_trade = False
+                    risk_state.reason = f"Event: {event_name} ({event_minutes:+.0f}m)"
+
+                # Low volatility regime — block trading
+                if current_regime and current_regime.regime == Regime.LOW_VOLATILITY and risk_state.can_trade:
+                    risk_state.can_trade = False
+                    risk_state.reason = f"Low vol regime (conf={current_regime.confidence:.2f})"
+
+                # Apply regime size multiplier
+                if current_regime and regime_params.get("size_multiplier", 1.0) < 1.0:
+                    risk_state.size_multiplier *= regime_params["size_multiplier"]
+
                 # ── Entry evaluation ──
                 ob = orderbook_mgr.last_summary
+                regime_edge_mult = regime_params.get("edge_multiplier", 1.0) if regime_params else 1.0
                 if ob and risk_state.can_trade and not has_position_this_window:
                     entry_decision = entry_logic.evaluate(
                         est_prob_up=est_prob_up,
@@ -546,6 +633,7 @@ async def main():
                         no_best_bid=ob.no_best_bid,
                         seconds_remaining=secs_remaining,
                         has_position=has_position_this_window,
+                        regime_edge_multiplier=regime_edge_mult,
                     )
 
                     # ── Execute if signal fires ──
@@ -625,10 +713,11 @@ async def main():
                 momentum_val = 0.0
                 liquidation_val = 0.0
                 ob_signal_val = 0.0
+                sentiment_val = 0.0
                 coinbase_dir = 0.0
                 raw_signal_val = 0.0
                 est_prob_up = 0.5
-                current_weights = (0.0, 0.0, 0.0, 0.0)
+                current_weights = (0.0, 0.0, 0.0, 0.0, 0.0)
                 entry_decision = EntryDecision(reason="No active market")
 
             # ── Log signal every tick ──
@@ -656,17 +745,23 @@ async def main():
             cg_status = ""
             if coinglass.data.is_valid:
                 age = int(time.time() - coinglass.last_fetch_time)
-                cg_status = f"L:{len(coinglass.data.long_levels)} S:{len(coinglass.data.short_levels)} [{age}s ago]"
+                cg_status = f"CG:L{len(coinglass.data.long_levels)}/S{len(coinglass.data.short_levels)} [{age}s]"
             elif coinglass.consecutive_failures > 0:
-                cg_status = f"(offline x{coinglass.consecutive_failures})"
+                cg_status = f"CG:(offline x{coinglass.consecutive_failures})"
             else:
-                cg_status = "(loading...)"
+                cg_status = "CG:(loading...)"
+            # Append live liquidation status
+            if binance_liqs.is_connected:
+                cg_status += f" | Live:{binance_liqs.status_str}"
             render_dashboard(
                 config, binance, oracle, coinbase, market_discovery, orderbook_mgr, db,
                 poly_client.is_authenticated, executor, risk_mgr, risk_state, health,
-                oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, raw_signal_val, est_prob_up,
+                oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, sentiment_val, raw_signal_val, est_prob_up,
                 current_weights, entry_decision, last_trade_msg, cg_status,
                 coinbase_dir=coinbase_dir,
+                coinalyze_status=coinalyze.status_str,
+                regime_state=current_regime,
+                event_status=event_calendar.status_str(),
             )
 
             try:
@@ -701,17 +796,22 @@ async def main():
         await oracle.stop()
         await coinbase.stop()
         await coinglass.stop()
+        await coinalyze.stop()
+        await binance_liqs.stop()
         binance_task.cancel()
         oracle_task.cancel()
         coinbase_task.cancel()
         coinglass_task.cancel()
-        for t in [binance_task, oracle_task, coinbase_task, coinglass_task]:
+        coinalyze_task.cancel()
+        binance_liq_task.cancel()
+        for t in [binance_task, oracle_task, coinbase_task, coinglass_task, coinalyze_task, binance_liq_task]:
             try:
                 await t
             except asyncio.CancelledError:
                 pass
         await market_discovery.close()
         await coinglass.close()
+        await coinalyze.close()
         await telegram.close()
         orderbook_mgr.close()
         db.close()

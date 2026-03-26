@@ -26,9 +26,14 @@ signals:
   max_adjustment: 0.15
 
 entry:
-  min_edge: 0.02
-  max_edge: 0.10
-  fee_adjustment: 0.01
+  # Optimised from unified backtest (544 trades, 69.5% WR)
+  # Best strategy: 3min entry, >=3% confidence → 78.4% WR, $0.082/trade
+  min_edge: 0.015          # Lowered: backtest shows edge exists at lower thresholds
+  max_edge: 0.08           # Reduced: no need to demand huge edge early
+  fee_adjustment: 0.02     # Raised: realistic Polymarket fee (~2%)
+  min_confidence: 0.03     # NEW: minimum signal confidence to trade (from backtest)
+  preferred_entry_secs: 180  # NEW: target entry at 3min remaining (sweet spot)
+  latest_entry_secs: 60    # NEW: don't enter after 1min remaining (market too efficient)
   gtc_timeout_sec: 10
   fok_slippage: 0.005
 
@@ -40,9 +45,12 @@ sizing:
 
 risk:
   daily_loss_cap_pct: 0.20
+  daily_loss_warn_pct: 0.15
   min_bankroll: 10.0
   streak_reduce_at: 3
-  streak_reduce_factor: 0.5
+  streak_reduce_factor: 0.75
+  streak_heavy_reduce_at: 5
+  streak_heavy_reduce_factor: 0.5
   streak_pause_at: 7
   streak_pause_minutes: 30
   streak_reset_wins: 3

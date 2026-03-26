@@ -53,9 +53,12 @@ class Config:
     max_adjustment: float = 0.15
 
     # Entry
-    min_edge: float = 0.02
-    max_edge: float = 0.10
-    fee_adjustment: float = 0.01
+    min_edge: float = 0.015
+    max_edge: float = 0.08
+    fee_adjustment: float = 0.02
+    min_confidence: float = 0.03       # Minimum signal confidence to trade
+    preferred_entry_secs: int = 180    # Target entry at 3min remaining
+    latest_entry_secs: int = 60        # Don't enter after 1min remaining
     gtc_timeout_sec: int = 10
     fok_slippage: float = 0.005
 
@@ -67,9 +70,12 @@ class Config:
 
     # Risk
     daily_loss_cap_pct: float = 0.20
+    daily_loss_warn_pct: float = 0.15
     min_bankroll: float = 10.0
     streak_reduce_at: int = 3
-    streak_reduce_factor: float = 0.5
+    streak_reduce_factor: float = 0.75
+    streak_heavy_reduce_at: int = 5
+    streak_heavy_reduce_factor: float = 0.5
     streak_pause_at: int = 7
     streak_pause_minutes: int = 30
     streak_reset_wins: int = 3
@@ -95,6 +101,7 @@ class Config:
     polygon_rpc_url: str = "https://polygon-rpc.com"
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    coinalyze_api_key: str = ""
 
     @classmethod
     def load(cls, config_path: str = "config.yaml", env_path: str = ".env") -> "Config":
@@ -140,6 +147,9 @@ class Config:
             c.min_edge = e.get("min_edge", c.min_edge)
             c.max_edge = e.get("max_edge", c.max_edge)
             c.fee_adjustment = e.get("fee_adjustment", c.fee_adjustment)
+            c.min_confidence = e.get("min_confidence", c.min_confidence)
+            c.preferred_entry_secs = e.get("preferred_entry_secs", c.preferred_entry_secs)
+            c.latest_entry_secs = e.get("latest_entry_secs", c.latest_entry_secs)
             c.gtc_timeout_sec = e.get("gtc_timeout_sec", c.gtc_timeout_sec)
             c.fok_slippage = e.get("fok_slippage", c.fok_slippage)
 
@@ -155,9 +165,12 @@ class Config:
         r = raw.get("risk", {})
         if isinstance(r, dict):
             c.daily_loss_cap_pct = r.get("daily_loss_cap_pct", c.daily_loss_cap_pct)
+            c.daily_loss_warn_pct = r.get("daily_loss_warn_pct", c.daily_loss_warn_pct)
             c.min_bankroll = r.get("min_bankroll", c.min_bankroll)
             c.streak_reduce_at = r.get("streak_reduce_at", c.streak_reduce_at)
             c.streak_reduce_factor = r.get("streak_reduce_factor", c.streak_reduce_factor)
+            c.streak_heavy_reduce_at = r.get("streak_heavy_reduce_at", c.streak_heavy_reduce_at)
+            c.streak_heavy_reduce_factor = r.get("streak_heavy_reduce_factor", c.streak_heavy_reduce_factor)
             c.streak_pause_at = r.get("streak_pause_at", c.streak_pause_at)
             c.streak_pause_minutes = r.get("streak_pause_minutes", c.streak_pause_minutes)
             c.streak_reset_wins = r.get("streak_reset_wins", c.streak_reset_wins)
@@ -187,5 +200,6 @@ class Config:
         c.polygon_rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
         c.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         c.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        c.coinalyze_api_key = os.getenv("COINALYZE_API_KEY", "")
 
         return c
