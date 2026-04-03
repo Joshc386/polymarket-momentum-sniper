@@ -56,9 +56,10 @@ class Config:
     min_edge: float = 0.015
     max_edge: float = 0.08
     fee_adjustment: float = 0.02
-    min_confidence: float = 0.03       # Minimum signal confidence to trade
+    min_confidence: float = 0.02       # Minimum signal confidence to trade
     preferred_entry_secs: int = 180    # Target entry at 3min remaining
     latest_entry_secs: int = 60        # Don't enter after 1min remaining
+    earliest_entry_secs: int = 270     # Start scanning at 4:30 remaining
     gtc_timeout_sec: int = 10
     fok_slippage: float = 0.005
 
@@ -150,6 +151,7 @@ class Config:
             c.min_confidence = e.get("min_confidence", c.min_confidence)
             c.preferred_entry_secs = e.get("preferred_entry_secs", c.preferred_entry_secs)
             c.latest_entry_secs = e.get("latest_entry_secs", c.latest_entry_secs)
+            c.earliest_entry_secs = e.get("earliest_entry_secs", c.earliest_entry_secs)
             c.gtc_timeout_sec = e.get("gtc_timeout_sec", c.gtc_timeout_sec)
             c.fok_slippage = e.get("fok_slippage", c.fok_slippage)
 

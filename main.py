@@ -53,7 +53,7 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 
 
 # ── Terminal display ───────────────────────────────────────────────────
-CLEAR = "\033[2J\033[H"
+CLEAR = "\033[H\033[J"  # Cursor home + clear below (no scroll)
 BOLD = "\033[1m"
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -98,17 +98,23 @@ def render_dashboard(
     L.append(f"  {DIM}{now}  |  Mode: {config.mode.upper()}{RESET}")
 
     # ── Prices ──
-    if binance.price > 0:
-        price_line = f"  {BOLD}BTC:{RESET} {GREEN}${binance.price:,.2f}{RESET}"
-        if oracle.price > 0:
+    # Oracle price is primary — Polymarket resolves on Chainlink, not Binance
+    if oracle.price > 0:
+        price_line = f"  {BOLD}BTC (Oracle):{RESET} {GREEN}${oracle.price:,.2f}{RESET}"
+        if binance.price > 0:
             d = ((binance.price - oracle.price) / oracle.price) * 100
             dc = GREEN if d > 0 else RED
-            price_line += f"  Oracle: ${oracle.price:,.2f} {dc}({d:+.3f}%){RESET}"
+            price_line += f"  Binance: ${binance.price:,.2f} {dc}({d:+.3f}%){RESET}"
         if coinbase.is_connected:
             cb_dir = coinbase_dir
             cb_c = GREEN if cb_dir > 0.1 else RED if cb_dir < -0.1 else DIM
             price_line += f"  CB: ${coinbase.price:,.2f} {cb_c}({cb_dir:+.2f}){RESET}"
+        oracle_age = int(time.time() - oracle.last_fetch_time) if oracle.last_fetch_time > 0 else 0
+        if oracle_age > 30:
+            price_line += f"  {RED}[stale {oracle_age}s]{RESET}"
         L.append(price_line)
+    elif binance.price > 0:
+        L.append(f"  {BOLD}BTC:{RESET} {GREEN}${binance.price:,.2f}{RESET} {YELLOW}(Oracle connecting...){RESET}")
     else:
         L.append(f"  {BOLD}BTC:{RESET} {YELLOW}Connecting...{RESET}")
 
@@ -247,12 +253,93 @@ def render_dashboard(
     if last_trade_msg:
         L.append(f"  {last_trade_msg}")
 
+    # ── Equity Curve (ASCII sparkline) ──
+    L.append(f"  {MAGENTA}-- Equity Curve --{RESET}")
+    resolved = [t for t in executor.session_trades if t.pnl is not None]
+    if resolved:
+        cumulative = []
+        running = 0.0
+        for t in resolved:
+            running += t.pnl
+            cumulative.append(running)
+        # Show last 50 data points, scale to 30 chars wide
+        points = cumulative[-50:]
+        mn, mx = min(points), max(points)
+        span = mx - mn if mx != mn else 1.0
+        SPARK_CHARS = " _.,:-=!#@"
+        spark = ""
+        for p in points:
+            idx = int((p - mn) / span * (len(SPARK_CHARS) - 1))
+            idx = max(0, min(idx, len(SPARK_CHARS) - 1))
+            spark += SPARK_CHARS[idx]
+        pnl_c = GREEN if cumulative[-1] >= 0 else RED
+        L.append(
+            f"  {DIM}[{spark}]{RESET} "
+            f"{pnl_c}${cumulative[-1]:+.2f}{RESET}"
+        )
+    else:
+        L.append(f"  {DIM}No trades yet{RESET}")
+
+    # ── Recent Trades ──
+    L.append(f"  {MAGENTA}-- Recent Trades --{RESET}")
+    recent = resolved[-8:] if resolved else []
+    if recent:
+        for t in recent:
+            ts_raw = t.created_at if hasattr(t, "created_at") and t.created_at else "??:??:??"
+            ts = ts_raw[:19].split("T")[1] if "T" in ts_raw else ts_raw[-8:]
+            won = t.pnl > 0 if t.pnl is not None else False
+            wc = GREEN if won else RED
+            wl = "W" if won else "L"
+            res = t.resolution or "?"
+            pnl_str = f"${t.pnl:+.2f}" if t.pnl is not None else "..."
+            L.append(
+                f"  {DIM}{ts}{RESET} "
+                f"{wc}{wl}{RESET} "
+                f"{t.side:>3s} @ ${t.entry_price:.3f} "
+                f"-> {res:>4s} "
+                f"{wc}{pnl_str:>8s}{RESET}"
+            )
+    else:
+        L.append(f"  {DIM}No trades yet{RESET}")
+
+    # ── Market Activity (large orderbook moves) ──
+    L.append(f"  {MAGENTA}-- Market Activity --{RESET}")
+    if hasattr(orderbook, '_activity_log') and orderbook._activity_log:
+        for entry in orderbook._activity_log[-5:]:
+            L.append(f"  {DIM}{entry}{RESET}")
+    else:
+        # Show current depth deltas as activity indicator
+        if hasattr(orderbook, 'yes_bid_delta'):
+            bd = orderbook.yes_bid_delta
+            ad = orderbook.yes_ask_delta
+            nbd = orderbook.no_bid_delta
+            nad = orderbook.no_ask_delta
+            if abs(bd) > 0 or abs(ad) > 0:
+                bc = GREEN if bd > 0 else RED if bd < 0 else DIM
+                ac = GREEN if ad > 0 else RED if ad < 0 else DIM
+                L.append(
+                    f"  YES bids: {bc}{bd:+.0f}{RESET}  "
+                    f"YES asks: {ac}{ad:+.0f}{RESET}  "
+                    f"{DIM}NO bids: {nbd:+.0f}  NO asks: {nad:+.0f}{RESET}"
+                )
+            else:
+                L.append(f"  {DIM}Orderbook stable{RESET}")
+        else:
+            L.append(f"  {DIM}No activity data{RESET}")
+
     # Health
     if health:
         L.append(f"  {DIM}{health.summary_str()}{RESET}")
 
     L.append(f"  {DIM}Ctrl+C to stop{RESET}")
-    print("\n".join(L), flush=True)
+
+    # Pad to fixed height so terminal doesn't scroll
+    DASHBOARD_HEIGHT = 45
+    while len(L) < DASHBOARD_HEIGHT:
+        L.append("")
+
+    sys.stdout.write("\n".join(L[:DASHBOARD_HEIGHT]) + "\n")
+    sys.stdout.flush()
 
 
 # ── Resolution detection ──────────────────────────────────────────────
@@ -321,6 +408,7 @@ async def main():
         min_confidence=config.min_confidence,
         preferred_entry_secs=config.preferred_entry_secs,
         latest_entry_secs=config.latest_entry_secs,
+        earliest_entry_secs=config.earliest_entry_secs,
     )
     sizer = PositionSizer(
         kelly_multiplier=config.kelly_multiplier,
@@ -452,6 +540,29 @@ async def main():
 
             mkt = market_discovery.current_market
 
+            # ── Force-resolve stale pending trades ──
+            # Must NOT depend on mkt being non-None — if market discovery
+            # stalls, this is the only way to unstick the bot.
+            if executor.pending_trade:
+                pending_age = now - executor.pending_trade_time
+                if pending_age > 180:
+                    logger.warning(
+                        f"Force-resolving stale trade after {pending_age:.0f}s "
+                        f"(market={'found' if mkt else 'stalled'})"
+                    )
+                    resolution = await detect_resolution(oracle)
+                    trade = executor.resolve_pending_trade(resolution)
+                    if trade:
+                        won = trade.pnl is not None and trade.pnl > 0
+                        risk_mgr.record_result(trade.pnl or 0)
+                        tag = "LIVE" if is_live else "PAPER"
+                        last_trade_msg = (
+                            f"{'V' if won else 'X'} [{tag}] {trade.side} "
+                            f"{'WIN' if won else 'LOSS'} ${trade.pnl:+.2f}  "
+                            f"Resolved: {resolution} (force)"
+                        )
+                    has_position_this_window = False
+
             # ── Window transition ──
             if mkt and mkt.slug != last_window_slug:
                 # Resolve any pending trade from previous window
@@ -533,12 +644,13 @@ async def main():
                     candles=binance.candles,
                     current_candle=binance.current_candle,
                 )
-                # Layer 3: Liquidation (CoinGlass levels + Binance live stream)
+                # Layer 3: Liquidation (Binance live + Coinalyze positioning + CoinGlass)
                 liquidation_val = liq_signal.compute(
                     current_price=binance.price,
                     liq_data=coinglass.data,
                     price_momentum=momentum_val,
                     live_stats=binance_liqs.stats,
+                    coinalyze_snapshot=coinalyze.snapshot,
                 )
                 # Coinbase cross-confirmation
                 coinbase_dir = coinbase.price_direction if coinbase.is_connected else 0.0
@@ -742,27 +854,37 @@ async def main():
                     pass
 
             # ── Render ──
-            cg_status = ""
+            # L3 status: show all three data sources
+            liq_parts = []
+            # Coinalyze positioning (primary replacement for CoinGlass)
+            if coinalyze.snapshot.is_valid:
+                s = coinalyze.snapshot
+                liq_parts.append(f"CA:L/S={s.ls_ratio:.2f} FR={s.funding_rate:+.4f}%")
+            else:
+                liq_parts.append("CA:(offline)")
+            # CoinGlass static levels (bonus if available)
             if coinglass.data.is_valid:
                 age = int(time.time() - coinglass.last_fetch_time)
-                cg_status = f"CG:L{len(coinglass.data.long_levels)}/S{len(coinglass.data.short_levels)} [{age}s]"
-            elif coinglass.consecutive_failures > 0:
-                cg_status = f"CG:(offline x{coinglass.consecutive_failures})"
-            else:
-                cg_status = "CG:(loading...)"
-            # Append live liquidation status
+                liq_parts.append(f"CG:L{len(coinglass.data.long_levels)}/S{len(coinglass.data.short_levels)} [{age}s]")
+            # Binance live liquidation stream
             if binance_liqs.is_connected:
-                cg_status += f" | Live:{binance_liqs.status_str}"
-            render_dashboard(
-                config, binance, oracle, coinbase, market_discovery, orderbook_mgr, db,
-                poly_client.is_authenticated, executor, risk_mgr, risk_state, health,
-                oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, sentiment_val, raw_signal_val, est_prob_up,
-                current_weights, entry_decision, last_trade_msg, cg_status,
-                coinbase_dir=coinbase_dir,
-                coinalyze_status=coinalyze.status_str,
-                regime_state=current_regime,
-                event_status=event_calendar.status_str(),
-            )
+                liq_parts.append(f"Live:{binance_liqs.status_str}")
+            else:
+                liq_parts.append("Live:(disconnected)")
+            cg_status = " | ".join(liq_parts)
+            try:
+                render_dashboard(
+                    config, binance, oracle, coinbase, market_discovery, orderbook_mgr, db,
+                    poly_client.is_authenticated, executor, risk_mgr, risk_state, health,
+                    oracle_lag_val, momentum_val, liquidation_val, ob_signal_val, sentiment_val, raw_signal_val, est_prob_up,
+                    current_weights, entry_decision, last_trade_msg, cg_status,
+                    coinbase_dir=coinbase_dir,
+                    coinalyze_status=coinalyze.status_str,
+                    regime_state=current_regime,
+                    event_status=event_calendar.status_str(),
+                )
+            except Exception as dash_err:
+                logger.warning(f"Dashboard render error (non-fatal): {dash_err}")
 
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=1.0)

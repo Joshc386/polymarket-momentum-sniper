@@ -138,22 +138,8 @@ class RiskManager:
             state.reason = f"Bankroll ${bankroll:.2f} below minimum ${self.min_bankroll:.2f}"
             return state
 
-        # Check daily loss cap (hard stop at 20%)
-        if self.daily_start_bankroll > 0:
-            loss_cap = self.daily_start_bankroll * self.daily_loss_cap_pct
-            if self.daily_pnl < -loss_cap:
-                state.can_trade = False
-                state.reason = f"Daily loss cap hit: ${self.daily_pnl:.2f} (cap: -${loss_cap:.2f})"
-                return state
-
-        # Check streak pause (active)
-        if self.paused_until > 0 and self._now() < self.paused_until:
-            remaining = int(self.paused_until - self._now())
-            state.can_trade = False
-            state.reason = f"Streak pause -- {remaining}s remaining"
-            return state
-
-        # Streak pause just expired — reset fully and resume at normal size
+        # Streak pause expiry — reset BEFORE daily cap check so counters
+        # aren't left in a broken half-reset state when both conditions fire.
         if self._streak_was_paused and self.paused_until > 0 and self._now() >= self.paused_until:
             logger.info("Streak pause served — resetting to full trading")
             self.consecutive_losses = 0
@@ -163,6 +149,21 @@ class RiskManager:
             state.consecutive_losses = 0
             state.consecutive_wins = 0
             state.paused_until = 0.0
+
+        # Check daily loss cap (hard stop at 20%)
+        if self.daily_start_bankroll > 0:
+            loss_cap = self.daily_start_bankroll * self.daily_loss_cap_pct
+            if self.daily_pnl < -loss_cap:
+                state.can_trade = False
+                state.reason = f"Daily loss cap hit: ${self.daily_pnl:.2f} (cap: -${loss_cap:.2f})"
+                return state
+
+        # Check streak pause (still active — hasn't expired yet)
+        if self.paused_until > 0 and self._now() < self.paused_until:
+            remaining = int(self.paused_until - self._now())
+            state.can_trade = False
+            state.reason = f"Streak pause -- {remaining}s remaining"
+            return state
 
         # Graduated size multiplier from streak
         multiplier = 1.0

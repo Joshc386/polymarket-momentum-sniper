@@ -19,18 +19,21 @@ class EntryDecision:
 
 
 class EntryLogic:
-    """Backtest-optimised entry logic.
+    """Dynamic entry logic — enters at first strong signal within the window.
 
-    Key findings from unified backtest (544 trades, real Polymarket pricing):
-    - Best entry: 3min remaining, >=3% confidence → 78.4% WR, $0.082/trade
-    - Early entries (4m-3m) are profitable because market hasn't priced in direction
-    - Late entries (1m-30s) have highest accuracy but market is too efficient
-    - Signal confidence is more predictive than EV threshold alone
+    Key findings from entry timing backtest (8,256 trades, 30 days):
+    - "First signal above threshold" strategy: 67.5% WR, $1,045 total PnL
+    - Beats fixed 4m entry ($755) by capturing 2,573 extra trades
+    - Scanning 4:30→1:00 catches windows where signal is weak early but
+      strengthens as more price data arrives
+    - Earlier entry = better prices (market less efficient)
+    - Variable timing prevents market makers from front-running a fixed pattern
 
-    Entry timing rules:
-    - Don't enter before preferred_entry_secs (market not formed yet, no orderbook)
-    - Sweet spot: around preferred_entry_secs (3min default)
-    - Hard cutoff: don't enter after latest_entry_secs (market too efficient)
+    Entry window:
+    - Opens at earliest_entry_secs (4:30 default) — start scanning
+    - Enters as soon as confidence + edge thresholds are met
+    - Closes at latest_entry_secs (1:00 default) — stop trying
+    - One trade per window maximum
     """
 
     def __init__(
@@ -38,9 +41,10 @@ class EntryLogic:
         min_edge: float = 0.015,
         max_edge: float = 0.08,
         fee_adjustment: float = 0.02,
-        min_confidence: float = 0.03,
+        min_confidence: float = 0.02,
         preferred_entry_secs: int = 180,
         latest_entry_secs: int = 60,
+        earliest_entry_secs: int = 270,
     ):
         self.min_edge = min_edge
         self.max_edge = max_edge
@@ -48,6 +52,7 @@ class EntryLogic:
         self.min_confidence = min_confidence
         self.preferred_entry_secs = preferred_entry_secs
         self.latest_entry_secs = latest_entry_secs
+        self.earliest_entry_secs = earliest_entry_secs
 
     def evaluate(
         self,
@@ -82,6 +87,11 @@ class EntryLogic:
             decision.reason = "Already have position this window"
             return decision
 
+        # Hard cutoff: too early — window hasn't opened yet
+        if seconds_remaining > self.earliest_entry_secs:
+            decision.reason = f"Window not open ({seconds_remaining:.0f}s > {self.earliest_entry_secs}s)"
+            return decision
+
         # Hard cutoff: too close to expiry — market is fully efficient
         if seconds_remaining < self.latest_entry_secs:
             decision.reason = f"Too late ({seconds_remaining:.0f}s < {self.latest_entry_secs}s cutoff)"
@@ -108,25 +118,31 @@ class EntryLogic:
         decision.required_edge = required_edge
 
         # EV calculations
-        # YES: win if UP. Profit = (1 - yes_price), Loss = yes_price
+        # Polymarket fee is charged on WINNINGS only (not on losses).
+        # fee_adjustment is a rate (0.02 = 2%), applied to profit if we win.
         yes_price = yes_best_ask
-        ev_yes = (est_prob_up * (1.0 - yes_price)) - ((1.0 - est_prob_up) * yes_price) - self.fee_adjustment
+        profit_yes = 1.0 - yes_price
+        ev_yes = (est_prob_up * (profit_yes * (1.0 - self.fee_adjustment))) - ((1.0 - est_prob_up) * yes_price)
 
-        # NO: win if DOWN. Profit = (1 - no_price), Loss = no_price
         no_price = no_best_ask
-        ev_no = ((1.0 - est_prob_up) * (1.0 - no_price)) - (est_prob_up * no_price) - self.fee_adjustment
+        profit_no = 1.0 - no_price
+        ev_no = ((1.0 - est_prob_up) * (profit_no * (1.0 - self.fee_adjustment))) - (est_prob_up * no_price)
 
         decision.ev_yes = ev_yes
         decision.ev_no = ev_no
 
-        # Pick the better side
+        # Pick whichever side has better EV — this buys the cheap contrarian
+        # side when the market has overreacted.  Early paper trading showed
+        # 39% WR but +315% ROI with this approach because wins on cheap tokens
+        # pay $0.85 while losses cost $0.15.  The corrected fee formula (rate
+        # on winnings only, not flat penalty) now gives accurate EV for both sides.
         if ev_yes >= ev_no:
-            best_ev = ev_yes
             side = "YES"
+            best_ev = ev_yes
             price = yes_price
         else:
-            best_ev = ev_no
             side = "NO"
+            best_ev = ev_no
             price = no_price
 
         decision.best_ev = best_ev

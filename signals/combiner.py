@@ -36,7 +36,7 @@ class SignalCombiner:
     signal is amplified; when they disagree, it's dampened.
     """
 
-    max_adjustment: float = 0.15
+    max_adjustment: float = 0.20
     confirmation_boost: float = 1.20
     disagreement_dampen: float = 0.70
 

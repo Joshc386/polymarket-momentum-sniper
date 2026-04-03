@@ -7,7 +7,7 @@ so main.py can swap between them based on config.mode.
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from logging_db.database import Database
@@ -40,6 +40,11 @@ class TradeRecord:
     pnl: float | None = None
     db_id: int | None = None
     order_id: str | None = None
+    created_at: str = field(default="", init=False)
+
+    def __post_init__(self) -> None:
+        """Auto-populate created_at with current UTC timestamp."""
+        self.created_at = datetime.now(timezone.utc).isoformat()
 
 
 # ── Shared trade parameters (used by both engines) ────────────────────
@@ -119,6 +124,7 @@ class PaperExecutionEngine:
         self.bankroll = initial_bankroll
         self.slippage = slippage
         self.pending_trade: TradeRecord | None = None
+        self.pending_trade_time: float = 0.0
         self.session_trades: list[TradeRecord] = []
         self.session_wins = 0
         self.session_losses = 0
@@ -162,6 +168,7 @@ class PaperExecutionEngine:
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=True)
         self.pending_trade = trade
+        self.pending_trade_time = time.time()
 
         logger.info(
             f"[PAPER] {side} @ ${fill_price:.4f} | "
@@ -247,6 +254,7 @@ class LiveExecutionEngine:
         self.fok_slippage = fok_slippage
         self.gtc_timeout_sec = gtc_timeout_sec
         self.pending_trade: TradeRecord | None = None
+        self.pending_trade_time: float = 0.0
         self.pending_order_id: str | None = None
         self.session_trades: list[TradeRecord] = []
         self.session_wins = 0
@@ -320,6 +328,7 @@ class LiveExecutionEngine:
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=False)
         self.pending_trade = trade
+        self.pending_trade_time = time.time()
         self.pending_order_id = order_id
 
         logger.info(

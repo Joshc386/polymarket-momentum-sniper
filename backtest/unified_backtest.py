@@ -481,11 +481,12 @@ def run_unified_backtest(
                 won = (market_resolution == "DOWN")
 
             # PnL: win pays (1 - entry_price), lose costs entry_price
-            # Minus fees on entry
+            # Fee is charged on winnings only (Polymarket 2% on profit)
             if won:
-                pnl = (1.0 - entry_price) - config.fee_pct
+                gross_profit = 1.0 - entry_price
+                pnl = gross_profit - (gross_profit * config.fee_pct)
             else:
-                pnl = -entry_price - config.fee_pct
+                pnl = -entry_price
 
             trade = UnifiedTrade(
                 window_ts=window_ts,

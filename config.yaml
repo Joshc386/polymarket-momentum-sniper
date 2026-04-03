@@ -23,18 +23,19 @@ signals:
     weight_early: 0.25
     weight_late: 0.10
     refresh_interval_sec: 60
-  max_adjustment: 0.15
+  max_adjustment: 0.20     # Raised from 0.15: lets strong multi-layer agreement express conviction
 
 entry:
-  # Optimised from unified backtest (7,600 trades, 89.5% WR, real Polymarket pricing)
-  # Best timings: 30s entry ($0.16/trade), 2m ($0.05/trade), 1m ($0.02/trade)
-  # All confidence buckets profitable; higher confidence = higher profit
-  min_edge: 0.01           # Low threshold — backtest shows edge at all confidence levels
-  max_edge: 0.08           # Reduced: no need to demand huge edge early
+  # Dynamic first-signal entry (backtest: 8,256 trades, 67.5% WR, $1,045 total PnL)
+  # Scans from 4:30 to 1:00 — enters at first signal above threshold
+  # Beats fixed 4m entry by $289 (captures extra windows where signal strengthens late)
+  min_edge: 0.003          # Floor: still requires +EV after fees
+  max_edge: 0.025          # Flat curve: 0.025@270s, 0.017@180s, 0.008@60s
   fee_adjustment: 0.02     # Realistic Polymarket fee (~2%)
   min_confidence: 0.02     # Minimum signal confidence to trade (validated over 7,600 trades)
-  preferred_entry_secs: 120  # Target 2min remaining (97.9% WR, enough liquidity)
-  latest_entry_secs: 30    # Allow entries down to 30s (86.7% WR, best $/trade)
+  preferred_entry_secs: 180  # Target 3min remaining (sweet spot)
+  latest_entry_secs: 60    # Don't enter after 1min remaining (market too efficient)
+  earliest_entry_secs: 270  # Start scanning at 4:30 (dynamic first-signal entry)
   gtc_timeout_sec: 10
   fok_slippage: 0.005
 
