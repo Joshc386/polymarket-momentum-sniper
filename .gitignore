@@ -5,5 +5,10 @@ __pycache__/
 .venv/
 venv/
 bot_stderr.log
-backtest/data/BTCUSDT_1m_*.csv
-backtest/data/trades_*.csv
+backtest/data/
+
+# Local Claude Code agent permissions / session state
+.claude/
+
+# Nested research project — excluded pending review
+data/PolyMarket_Inefficient/
