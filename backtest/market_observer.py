@@ -281,8 +281,8 @@ async def main():
             if needs_refresh:
                 try:
                     await market_discovery.refresh()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Market discovery refresh failed: %s", e)
                 last_market_refresh = now
 
             mkt = market_discovery.current_market
@@ -328,8 +328,8 @@ async def main():
             if mkt and mkt.yes_token_id and now - last_orderbook_refresh > args.interval:
                 try:
                     orderbook_mgr.fetch(mkt.yes_token_id, mkt.no_token_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Orderbook fetch failed: %s", e)
                 last_orderbook_refresh = now
 
                 # Record sample

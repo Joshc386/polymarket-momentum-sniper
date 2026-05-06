@@ -35,7 +35,19 @@ if hasattr(sys.stderr, "reconfigure"):
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.polybacktest.com"
+
+# Load API key from environment or .env file
 API_KEY = os.environ.get("POLYBACKTEST_API_KEY", "")
+if not API_KEY:
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line.startswith("POLYBACKTEST_API_KEY="):
+                    API_KEY = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
 COIN = "btc"
 MARKET_TYPE = "5m"
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -268,24 +280,40 @@ def save_spot_csv(trades: list[dict], path: str) -> None:
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Fetch PolyBackTest Pro data")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="Re-fetch markets list to pick up newly resolved markets"
+    )
+    args = parser.parse_args()
+
     if not API_KEY:
-        logger.error("Set POLYBACKTEST_API_KEY environment variable")
+        logger.error("Set POLYBACKTEST_API_KEY environment variable (or add to .env)")
         return
 
     os.makedirs(DATA_DIR, exist_ok=True)
     markets_path = os.path.join(DATA_DIR, "polybacktest_markets.csv")
     snapshots_path = os.path.join(DATA_DIR, "polybacktest_snapshots.csv")
 
-    # Phase 1: Fetch all markets (skip if already downloaded)
-    if os.path.exists(markets_path):
+    # Phase 1: Fetch/refresh markets list
+    if os.path.exists(markets_path) and not args.refresh:
         with open(markets_path, "r", encoding="utf-8") as f:
             resolved = list(csv.DictReader(f))
         logger.info(f"Phase 1: Loaded {len(resolved)} markets from cache")
     else:
+        old_count = 0
+        if os.path.exists(markets_path):
+            with open(markets_path, "r", encoding="utf-8") as f:
+                old_count = sum(1 for _ in f) - 1
         logger.info("Phase 1: Fetching all resolved BTC 5m markets...")
         markets = fetch_all_markets()
         resolved = [m for m in markets if m.get("winner")]
-        logger.info(f"Found {len(resolved)} resolved markets (of {len(markets)} total)")
+        new_count = len(resolved) - old_count
+        logger.info(
+            f"Found {len(resolved)} resolved markets (of {len(markets)} total)"
+            f"{f' — {new_count} new since last fetch' if old_count else ''}"
+        )
         save_markets_csv(resolved, markets_path)
 
     # Phase 2: Fetch snapshots — check for resume

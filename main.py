@@ -2,6 +2,7 @@
 """Polymarket Momentum Sniper Bot — Phase 10: Regime Detection + Event Calendar"""
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -15,18 +16,24 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     os.system("")  # Enable ANSI escape codes on Windows
 
+# Install fastest available event loop (uvloop/winloop) before any asyncio use
+from core.event_loop import setup_event_loop
+setup_event_loop()
+
 from core.config import Config
 from core.polymarket_client import PolymarketClient
 from core.market_discovery import MarketDiscovery
 from core.execution import PaperExecutionEngine, LiveExecutionEngine
 from data.binance_feed import BinanceFeed
-from data.chainlink_oracle import ChainlinkOracle
+from data.polymarket_oracle import PolymarketOracle
 from data.orderbook import OrderbookManager
 from signals.oracle_lag import OracleLagSignal
 from signals.momentum import MomentumSignal
 from signals.liquidation import LiquidationSignal
 from signals.orderbook_signal import OrderbookSignal
+from signals.orderbook_fade import OrderbookFadeSignal
 from signals.sentiment_signal import SentimentSignal
+from signals.taker_ratio import TakerRatioSignal
 from signals.combiner import SignalCombiner
 from data.coinglass_scraper import CoinGlassScraper
 from data.coinbase_feed import CoinbaseFeed
@@ -37,6 +44,7 @@ from strategy.entry_logic import EntryLogic, EntryDecision
 from strategy.sizing import PositionSizer
 from strategy.risk_manager import RiskManager
 from strategy.regime_detector import RegimeDetector, Regime
+from strategy.mtf_regime_detector import MTFRegimeDetector
 from strategy.event_calendar import EventCalendar
 from notifications.telegram import TelegramNotifier
 from logging_db.database import Database
@@ -53,7 +61,8 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 
 
 # ── Terminal display ───────────────────────────────────────────────────
-CLEAR = "\033[H\033[J"  # Cursor home + clear below (no scroll)
+CURSOR_HOME = "\033[H"   # Move cursor to top-left (no clear, no scroll)
+CLEAR_SCREEN = "\033[2J\033[H"  # Full clear + home (used once at startup)
 BOLD = "\033[1m"
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -91,7 +100,6 @@ def render_dashboard(
 ):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     L = []
-    L.append(CLEAR)
     mode_label = "LIVE TRADING" if config.mode == "live" else "Paper Trading"
     mode_color = RED if config.mode == "live" else CYAN
     L.append(f"{BOLD}{mode_color}  POLYMARKET MOMENTUM SNIPER -- {mode_label}{RESET}")
@@ -235,23 +243,27 @@ def render_dashboard(
         t = executor.pending_trade
         L.append(
             f"  {YELLOW}PENDING:{RESET} {t.side} @ ${t.entry_price:.4f} "
-            f"${t.size_usdc:.2f}  Waiting for resolution..."
+            f"${t.size_usdc:.2f} ({t.num_shares:.2f} shares)  "
+            f"Waiting for resolution..."
         )
 
     # ── Session stats ──
     L.append(f"  {MAGENTA}-- Session --{RESET}")
     pnl_c = GREEN if executor.session_pnl >= 0 else RED
-    L.append(
+    bankroll_line = (
         f"  Bankroll: {BOLD}${executor.bankroll:.2f}{RESET}  "
         f"P&L: {pnl_c}${executor.session_pnl:+.2f}{RESET}  "
         f"Trades: {executor.total_trades}  "
         f"W/L: {executor.session_wins}/{executor.session_losses}  "
         f"WR: {executor.win_rate:.0%}"
     )
+    if executor.pending_trade:
+        bankroll_line += f"  {YELLOW}(${executor.pending_trade.size_usdc:.2f} in play){RESET}"
+    L.append(bankroll_line)
 
-    # Last trade message
+    # Last trade event
     if last_trade_msg:
-        L.append(f"  {last_trade_msg}")
+        L.append(f"  {DIM}Last: {last_trade_msg}{RESET}")
 
     # ── Equity Curve (ASCII sparkline) ──
     L.append(f"  {MAGENTA}-- Equity Curve --{RESET}")
@@ -282,10 +294,24 @@ def render_dashboard(
 
     # ── Recent Trades ──
     L.append(f"  {MAGENTA}-- Recent Trades --{RESET}")
-    recent = resolved[-8:] if resolved else []
-    if recent:
+    recent = resolved[-7:] if resolved else []
+    if recent or executor.pending_trade:
+        # Show pending trade at the top of the list
+        if executor.pending_trade:
+            pt = executor.pending_trade
+            pt_ts = pt.created_at[:19].split("T")[1] if "T" in pt.created_at else pt.created_at[-8:]
+            L.append(
+                f"  {DIM}{pt_ts}{RESET} "
+                f"{YELLOW}P{RESET} "
+                f"{pt.side:>3s} @ ${pt.entry_price:.3f} "
+                f"-> {YELLOW}{'PEND':>4s}{RESET} "
+                f"{DIM}{'$' + f'{pt.size_usdc:.2f}':>8s}{RESET}"
+            )
         for t in recent:
-            ts_raw = t.created_at if hasattr(t, "created_at") and t.created_at else "??:??:??"
+            # Show resolution time if available, otherwise entry time
+            ts_raw = (t.resolved_at if hasattr(t, "resolved_at") and t.resolved_at
+                      else t.created_at if hasattr(t, "created_at") and t.created_at
+                      else "??:??:??")
             ts = ts_raw[:19].split("T")[1] if "T" in ts_raw else ts_raw[-8:]
             won = t.pnl > 0 if t.pnl is not None else False
             wc = GREEN if won else RED
@@ -333,18 +359,38 @@ def render_dashboard(
 
     L.append(f"  {DIM}Ctrl+C to stop{RESET}")
 
-    # Pad to fixed height so terminal doesn't scroll
-    DASHBOARD_HEIGHT = 45
-    while len(L) < DASHBOARD_HEIGHT:
-        L.append("")
-
-    sys.stdout.write("\n".join(L[:DASHBOARD_HEIGHT]) + "\n")
+    # Render in-place: move cursor to each row and overwrite.
+    # Uses absolute cursor positioning to avoid scrolling — never
+    # writes a trailing newline on the last row, so the terminal
+    # buffer doesn't grow.
+    CLEAR_LINE = "\033[K"
+    buf = []
+    for row_idx, line in enumerate(L):
+        # \033[{row};1H = move to row (1-based), column 1
+        buf.append(f"\033[{row_idx + 1};1H{line}{CLEAR_LINE}")
+    # Clear any leftover rows below our content (up to row 50)
+    for row_idx in range(len(L), 50):
+        buf.append(f"\033[{row_idx + 1};1H{CLEAR_LINE}")
+    sys.stdout.write("".join(buf))
     sys.stdout.flush()
 
 
 # ── Resolution detection ──────────────────────────────────────────────
-async def detect_resolution(oracle: ChainlinkOracle) -> str:
-    """Determine if BTC went UP or DOWN by comparing oracle price to window open."""
+async def detect_resolution(
+    market_discovery: MarketDiscovery,
+    slug: str,
+    oracle: PolymarketOracle,
+) -> str:
+    """Determine market resolution — preferring actual Polymarket result.
+
+    First tries the authoritative source: Polymarket's own resolution
+    from the Gamma API. Falls back to oracle price comparison.
+    """
+    resolution = await market_discovery.fetch_resolution(slug)
+    if resolution in ("UP", "DOWN"):
+        return resolution
+
+    # Fallback: oracle price comparison
     await oracle.fetch_once()
     if oracle.price >= oracle.window_open_price:
         return "UP"
@@ -362,7 +408,7 @@ async def main():
 
     # Data feeds
     binance = BinanceFeed()
-    oracle = ChainlinkOracle()
+    oracle = PolymarketOracle()
     coinbase = CoinbaseFeed()
     health = HealthMonitor()
 
@@ -384,7 +430,9 @@ async def main():
         lookback_candles=config.momentum_lookback_candles,
     )
     ob_signal = OrderbookSignal()
+    ob_fade_signal = OrderbookFadeSignal()
     sent_signal = SentimentSignal()
+    taker_signal = TakerRatioSignal()
     combiner = SignalCombiner(max_adjustment=config.max_adjustment)
 
     # Liquidation layer
@@ -432,7 +480,23 @@ async def main():
     )
 
     # Regime detection + Event calendar
-    regime_detector = RegimeDetector()
+    # Load regime config directly from YAML (Config object doesn't parse this section)
+    import yaml as _yaml
+    with open("config.yaml", "r") as _f:
+        _raw_cfg = _yaml.safe_load(_f) or {}
+    regime_cfg = _raw_cfg.get("regime", {})
+    if regime_cfg.get("detector") == "mtf":
+        regime_detector = MTFRegimeDetector(
+            trend_threshold=regime_cfg.get("trend_threshold", 0.30),
+            high_vol_percentile=regime_cfg.get("high_vol_percentile", 0.90),
+            low_vol_percentile=regime_cfg.get("low_vol_percentile", 0.20),
+            alignment_weight=regime_cfg.get("alignment_weight", 0.55),
+            stickiness=regime_cfg.get("stickiness", 3),
+        )
+    else:
+        regime_detector = RegimeDetector()
+    regime_allowed = set(regime_cfg.get("allowed_regimes", []))
+    regime_blocked = set(regime_cfg.get("block_regimes", []))
     event_calendar = EventCalendar(buffer_minutes=15)
 
     # Execution — select engine based on mode
@@ -465,6 +529,7 @@ async def main():
             initial_bankroll=config.initial_bankroll,
             slippage=config.fok_slippage,
         )
+        executor.restore_from_db()
 
     # Notifications
     telegram = TelegramNotifier(
@@ -486,9 +551,12 @@ async def main():
         loop.add_signal_handler(signal.SIGINT, handle_shutdown)
         loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
 
+    # Register taker ratio callback on Binance trade stream
+    binance.trade_callbacks.append(taker_signal.on_trade)
+
     # Start background feeds
     binance_task = asyncio.create_task(binance.start())
-    oracle_task = asyncio.create_task(oracle.start(poll_interval=2.0))
+    oracle_task = asyncio.create_task(oracle.start())  # Price fed from Binance/Coinbase average
     coinbase_task = asyncio.create_task(coinbase.start())
     coinglass_task = asyncio.create_task(
         coinglass.start(current_price_getter=lambda: binance.price)
@@ -515,7 +583,9 @@ async def main():
     momentum_val = 0.0
     liquidation_val = 0.0
     ob_signal_val = 0.0
+    fade_signal_val = 0.0
     sentiment_val = 0.0
+    taker_ratio_val = 0.0
     coinbase_dir = 0.0
     raw_signal_val = 0.0
     est_prob_up = 0.5
@@ -525,6 +595,10 @@ async def main():
     last_trade_msg = ""
     current_regime = None
     regime_params = {}
+
+    # Clear terminal once at startup, hide cursor, then updates are in-place
+    sys.stdout.write(CLEAR_SCREEN + "\033[?25l")  # Hide cursor
+    sys.stdout.flush()
 
     try:
         while not shutdown_event.is_set():
@@ -541,16 +615,22 @@ async def main():
             mkt = market_discovery.current_market
 
             # ── Force-resolve stale pending trades ──
-            # Must NOT depend on mkt being non-None — if market discovery
-            # stalls, this is the only way to unstick the bot.
+            # Only force-resolve if the window has actually ended (market
+            # expired or discovery stalled). The 180s timeout is a fallback
+            # for when market discovery is completely stuck — it must NOT
+            # fire during a normal 5-minute window, which would cause
+            # double-entry on the same market.
             if executor.pending_trade:
                 pending_age = now - executor.pending_trade_time
-                if pending_age > 180:
+                window_ended = mkt is None or (mkt and mkt.time_remaining <= 0)
+                if window_ended and pending_age > 30:
                     logger.warning(
-                        f"Force-resolving stale trade after {pending_age:.0f}s "
-                        f"(market={'found' if mkt else 'stalled'})"
+                        f"Force-resolving trade after window end ({pending_age:.0f}s pending, "
+                        f"market={'expired' if mkt else 'stalled'})"
                     )
-                    resolution = await detect_resolution(oracle)
+                    resolution = await detect_resolution(
+                        market_discovery, last_window_slug, oracle
+                    )
                     trade = executor.resolve_pending_trade(resolution)
                     if trade:
                         won = trade.pnl is not None and trade.pnl > 0
@@ -562,12 +642,51 @@ async def main():
                             f"Resolved: {resolution} (force)"
                         )
                     has_position_this_window = False
+                elif not window_ended and pending_age > 600:
+                    # Ultimate fallback: if somehow stuck for 10+ minutes
+                    # (2 full windows), force-resolve regardless
+                    logger.error(
+                        f"Force-resolving stuck trade after {pending_age:.0f}s "
+                        f"(safety fallback)"
+                    )
+                    resolution = await detect_resolution(
+                        market_discovery, last_window_slug, oracle
+                    )
+                    trade = executor.resolve_pending_trade(resolution)
+                    if trade:
+                        won = trade.pnl is not None and trade.pnl > 0
+                        risk_mgr.record_result(trade.pnl or 0)
+                        tag = "LIVE" if is_live else "PAPER"
+                        last_trade_msg = (
+                            f"{'V' if won else 'X'} [{tag}] {trade.side} "
+                            f"{'WIN' if won else 'LOSS'} ${trade.pnl:+.2f}  "
+                            f"Resolved: {resolution} (force-stuck)"
+                        )
+                    has_position_this_window = False
 
             # ── Window transition ──
             if mkt and mkt.slug != last_window_slug:
+                # First iteration: observe the in-progress window but don't trade it.
+                # We only trade windows we've seen from the start.
+                if not last_window_slug:
+                    last_window_slug = mkt.slug
+                    has_position_this_window = True  # Block trading this window
+                    logger.info(
+                        f"Startup: observing in-progress window {mkt.slug}, "
+                        f"will trade from next window"
+                    )
+                    if oracle.price > 0:
+                        oracle.set_window_open_price()
+                    else:
+                        await oracle.fetch_once()
+                        oracle.set_window_open_price()
+                    continue
+
                 # Resolve any pending trade from previous window
                 if executor.pending_trade and last_window_slug:
-                    resolution = await detect_resolution(oracle)
+                    resolution = await detect_resolution(
+                        market_discovery, last_window_slug, oracle
+                    )
                     trade = executor.resolve_pending_trade(resolution)
                     if trade:
                         won = trade.pnl is not None and trade.pnl > 0
@@ -594,6 +713,7 @@ async def main():
                 last_window_slug = mkt.slug
                 has_position_this_window = False
                 ob_signal.reset()  # Reset L4 history for new window
+                ob_fade_signal.reset()  # Reset L6 fade history
                 binance_liqs.reset()  # Reset live liq stats for new window
                 if oracle.price > 0:
                     oracle.set_window_open_price()
@@ -608,6 +728,12 @@ async def main():
                 except Exception as e:
                     logger.debug(f"Orderbook: {e}")
                 last_orderbook_refresh = now
+
+            # ── Oracle price (Binance/Coinbase average) ──
+            oracle.update_price(
+                binance_price=binance.price,
+                coinbase_price=coinbase.price if coinbase.is_connected else 0.0,
+            )
 
             # ── Update health monitor ──
             if binance.price > 0:
@@ -679,6 +805,16 @@ async def main():
                 else:
                     ob_signal_val = 0.0
 
+                # Layer 6: Orderbook fade (contrarian on extreme imbalances)
+                if ob and ob.yes_bid_depth > 0:
+                    fade_signal_val = ob_fade_signal.compute(
+                        yes_bid_depth=ob.yes_bid_depth,
+                        yes_ask_depth=ob.yes_ask_depth,
+                        seconds_remaining=secs_remaining,
+                    )
+                else:
+                    fade_signal_val = 0.0
+
                 # Layer 5: Cross-exchange sentiment (Coinalyze)
                 if coinalyze.snapshot.is_valid:
                     sentiment_val = sent_signal.compute(
@@ -688,11 +824,19 @@ async def main():
                 else:
                     sentiment_val = 0.0
 
+                # Layer 7: Taker buy ratio (from Binance trade stream)
+                taker_ratio_val = taker_signal.compute()
+
                 # Regime detection
                 current_regime = regime_detector.detect(binance.candles)
                 regime_params = regime_detector.get_params(current_regime.regime)
 
-                current_weights = combiner.get_weights(secs_remaining)
+                # Select weight schedule based on regime
+                _schedule_override = ""
+                if current_regime and current_regime.regime == Regime.RANGING:
+                    _schedule_override = "ranging"
+
+                current_weights = combiner.get_weights(secs_remaining, _schedule_override)
                 raw_signal_val, est_prob_up = combiner.combine(
                     oracle_lag_signal=oracle_lag_val,
                     momentum_signal=momentum_val,
@@ -702,6 +846,9 @@ async def main():
                     orderbook_signal=ob_signal_val,
                     sentiment_signal=sentiment_val,
                     regime_weight_adjustments=regime_params.get("weight_adjustments"),
+                    fade_signal=fade_signal_val,
+                    taker_ratio_signal=taker_ratio_val,
+                    schedule_override=_schedule_override,
                 )
 
                 # Check if critical feeds are healthy before trading
@@ -724,10 +871,22 @@ async def main():
                     risk_state.can_trade = False
                     risk_state.reason = f"Event: {event_name} ({event_minutes:+.0f}m)"
 
-                # Low volatility regime — block trading
-                if current_regime and current_regime.regime == Regime.LOW_VOLATILITY and risk_state.can_trade:
-                    risk_state.can_trade = False
-                    risk_state.reason = f"Low vol regime (conf={current_regime.confidence:.2f})"
+                # Regime affinity gating
+                if current_regime and risk_state.can_trade:
+                    regime_label = current_regime.regime.value
+                    blocked = False
+                    if regime_blocked and regime_label in regime_blocked:
+                        blocked = True
+                    elif regime_allowed and regime_label not in regime_allowed:
+                        blocked = True
+                    elif current_regime.regime == Regime.LOW_VOLATILITY:
+                        blocked = True  # Fallback safety net
+                    if blocked:
+                        risk_state.can_trade = False
+                        risk_state.reason = (
+                            f"Regime blocked: {regime_label} "
+                            f"(conf={current_regime.confidence:.2f})"
+                        )
 
                 # Apply regime size multiplier
                 if current_regime and regime_params.get("size_multiplier", 1.0) < 1.0:
@@ -746,6 +905,7 @@ async def main():
                         seconds_remaining=secs_remaining,
                         has_position=has_position_this_window,
                         regime_edge_multiplier=regime_edge_mult,
+                        signal_aligned=_schedule_override == "ranging",
                     )
 
                     # ── Execute if signal fires ──
@@ -760,6 +920,11 @@ async def main():
 
                         if bet_size > 0:
                             market_prob = ob.market_implied_prob_up
+                            weights_json = json.dumps({
+                                "L1": current_weights[0], "L2": current_weights[1],
+                                "L3": current_weights[2], "L4": current_weights[3],
+                                "L5": current_weights[4],
+                            })
                             trade_kwargs = dict(
                                 side=entry_decision.side,
                                 price=entry_decision.price,
@@ -777,6 +942,19 @@ async def main():
                                 btc_price=binance.price,
                                 oracle_price=oracle.price,
                                 oracle_open_price=oracle.window_open_price,
+                                # Enriched snapshot
+                                orderbook_signal=ob_signal_val,
+                                sentiment_signal=sentiment_val,
+                                coinbase_direction=coinbase_dir,
+                                regime=current_regime.regime.value if current_regime else "",
+                                regime_confidence=current_regime.confidence if current_regime else 0.0,
+                                risk_size_multiplier=risk_state.size_multiplier,
+                                consecutive_losses=risk_mgr.consecutive_losses,
+                                signal_weights=weights_json,
+                                ob_spread=ob.spread if ob else 0.0,
+                                ob_yes_depth=ob.yes_bid_depth if ob else 0.0,
+                                ob_ask_depth=ob.yes_ask_depth if ob else 0.0,
+                                session_trade_num=executor.total_trades + 1,
                             )
 
                             if is_live:
@@ -790,8 +968,8 @@ async def main():
                                 has_position_this_window = True
                                 tag = "LIVE" if is_live else "PAPER"
                                 last_trade_msg = (
-                                    f">> [{tag}] {entry_decision.side} @ "
-                                    f"${entry_decision.price:.4f} ${bet_size:.2f}"
+                                    f">> [{tag}] {trade.side} @ "
+                                    f"${trade.entry_price:.4f} ${trade.size_usdc:.2f}"
                                 )
                                 await telegram.notify_trade(
                                     is_paper=not is_live,
@@ -825,7 +1003,9 @@ async def main():
                 momentum_val = 0.0
                 liquidation_val = 0.0
                 ob_signal_val = 0.0
+                fade_signal_val = 0.0
                 sentiment_val = 0.0
+                taker_ratio_val = 0.0
                 coinbase_dir = 0.0
                 raw_signal_val = 0.0
                 est_prob_up = 0.5
@@ -836,6 +1016,16 @@ async def main():
             if mkt and mkt.is_active:
                 try:
                     ob = orderbook_mgr.last_summary
+                    # Build entry reason string
+                    if entry_decision and entry_decision.should_enter:
+                        _entry_reason = f"ENTERED: {entry_decision.side}"
+                    elif entry_decision and entry_decision.reason:
+                        _entry_reason = entry_decision.reason
+                    elif has_position_this_window:
+                        _entry_reason = "Position held this window"
+                    else:
+                        _entry_reason = "No signal"
+
                     db.insert_signal(
                         timestamp=datetime.now(timezone.utc).isoformat(),
                         estimated_prob_up=est_prob_up,
@@ -849,9 +1039,21 @@ async def main():
                         btc_price=binance.price,
                         oracle_price=oracle.price,
                         market_id=mkt.condition_id,
+                        # Enriched fields
+                        orderbook_signal=ob_signal_val,
+                        sentiment_signal=sentiment_val,
+                        coinbase_direction=coinbase_dir,
+                        regime=current_regime.regime.value if current_regime else "",
+                        regime_confidence=current_regime.confidence if current_regime else 0.0,
+                        entry_reason=_entry_reason,
+                        signal_weights=json.dumps({
+                            "L1": current_weights[0], "L2": current_weights[1],
+                            "L3": current_weights[2], "L4": current_weights[3],
+                            "L5": current_weights[4],
+                        }),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Signal logging failed: %s", e)
 
             # ── Render ──
             # L3 status: show all three data sources
@@ -894,6 +1096,8 @@ async def main():
     except KeyboardInterrupt:
         pass
     finally:
+        sys.stdout.write("\033[?25h")  # Restore cursor visibility
+        sys.stdout.flush()
         logger.info("Cleaning up...")
 
         # Live mode: cancel any open orders first
@@ -903,7 +1107,9 @@ async def main():
 
         # Resolve any final pending trade
         if executor.pending_trade:
-            resolution = await detect_resolution(oracle)
+            resolution = await detect_resolution(
+                market_discovery, last_window_slug, oracle
+            )
             trade = executor.resolve_pending_trade(resolution)
             if trade:
                 risk_mgr.record_result(trade.pnl or 0)

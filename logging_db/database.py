@@ -30,7 +30,21 @@ CREATE TABLE IF NOT EXISTS trades (
     oracle_price_at_open REAL,
     order_id TEXT,
     fill_price REAL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    -- Enriched snapshot fields (added for strategy analysis)
+    orderbook_signal REAL,                 -- L4 orderbook imbalance signal
+    sentiment_signal REAL,                 -- L5 cross-exchange sentiment signal
+    coinbase_direction REAL,               -- Coinbase price direction confirmation
+    regime TEXT,                           -- 'trending', 'ranging', 'volatile', 'low_volatility'
+    regime_confidence REAL,                -- Regime classifier confidence 0-1
+    risk_size_multiplier REAL,             -- Applied size multiplier (streak/regime/vol)
+    consecutive_losses INTEGER,            -- Loss streak count at time of entry
+    signal_weights TEXT,                   -- JSON: {"L1":w, "L2":w, "L3":w, "L4":w, "L5":w}
+    ob_spread REAL,                        -- Orderbook spread at entry (ask - bid)
+    ob_yes_depth REAL,                     -- YES side depth (top 5 levels)
+    ob_ask_depth REAL,                     -- Ask side depth (top 5 levels)
+    session_trade_num INTEGER,             -- Trade number within this session
+    resolved_at TEXT                       -- UTC timestamp when trade resolved
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -60,13 +74,46 @@ CREATE TABLE IF NOT EXISTS signal_log (
     actual_resolution TEXT,                 -- filled post-resolution
     btc_price REAL,
     oracle_price REAL,
-    market_id TEXT
+    market_id TEXT,
+    -- Enriched fields (added for strategy analysis)
+    orderbook_signal REAL,                 -- L4 signal value
+    sentiment_signal REAL,                 -- L5 signal value
+    coinbase_direction REAL,               -- Coinbase cross-confirmation
+    regime TEXT,                           -- Current regime classification
+    regime_confidence REAL,                -- Regime confidence
+    entry_reason TEXT,                     -- Why trade was/wasn't taken
+    signal_weights TEXT                    -- JSON of weight vector at this tick
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_market_id ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_signal_log_timestamp ON signal_log(timestamp);
 """
+
+# Columns to add to existing databases (migrations).
+# Each tuple is (table, column_name, column_def).
+_MIGRATIONS = [
+    ("trades", "orderbook_signal", "REAL"),
+    ("trades", "sentiment_signal", "REAL"),
+    ("trades", "coinbase_direction", "REAL"),
+    ("trades", "regime", "TEXT"),
+    ("trades", "regime_confidence", "REAL"),
+    ("trades", "risk_size_multiplier", "REAL"),
+    ("trades", "consecutive_losses", "INTEGER"),
+    ("trades", "signal_weights", "TEXT"),
+    ("trades", "ob_spread", "REAL"),
+    ("trades", "ob_yes_depth", "REAL"),
+    ("trades", "ob_ask_depth", "REAL"),
+    ("trades", "session_trade_num", "INTEGER"),
+    ("trades", "resolved_at", "TEXT"),
+    ("signal_log", "orderbook_signal", "REAL"),
+    ("signal_log", "sentiment_signal", "REAL"),
+    ("signal_log", "coinbase_direction", "REAL"),
+    ("signal_log", "regime", "TEXT"),
+    ("signal_log", "regime_confidence", "REAL"),
+    ("signal_log", "entry_reason", "TEXT"),
+    ("signal_log", "signal_weights", "TEXT"),
+]
 
 
 class Database:
@@ -77,13 +124,25 @@ class Database:
         self.conn: sqlite3.Connection | None = None
 
     def connect(self):
-        """Open connection and create tables if needed."""
+        """Open connection, create tables if needed, and run migrations."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._run_migrations()
         self.conn.commit()
         logger.info(f"Database initialized at {self.db_path}")
+
+    def _run_migrations(self) -> None:
+        """Add new columns to existing tables (idempotent)."""
+        for table, col_name, col_type in _MIGRATIONS:
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"
+                )
+                logger.info(f"Migration: added {table}.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def close(self):
         if self.conn:

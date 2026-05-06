@@ -60,6 +60,16 @@ risk:
   high_volatility_threshold: 0.02
   high_volatility_size_factor: 0.5
 
+regime:
+  detector: mtf
+  trend_threshold: 0.30
+  high_vol_percentile: 0.90
+  low_vol_percentile: 0.20
+  alignment_weight: 0.55
+  stickiness: 3
+  allowed_regimes: [trending_up, trending_down, ranging]
+  block_regimes: [high_vol, low_vol]
+
 telegram:
   enabled: true
   notify_every_trade: true

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import requests
 
-API_KEY = "pdm_CTfGOrxp1kcLpH44m9lkoDJScjGuiyvi"
+API_KEY = os.environ.get("POLYBACKTEST_API_KEY", "")
 API_BASE = "https://api.polybacktest.com"
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 OFFSETS = [30, 60, 120, 180, 240]
