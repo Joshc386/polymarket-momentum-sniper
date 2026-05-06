@@ -1,11 +1,12 @@
 import asyncio
-import json
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
 import websockets
+
+from core import fast_json as json
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,12 @@ class BinanceFeed:
     """Real-time BTC/USDT price and 1-min candle data from Binance."""
 
     price: float = 0.0
-    price_time: float = 0.0
+    price_time: float = 0.0           # Exchange-side timestamp (T field)
+    received_at: float = 0.0          # Our local time when message arrived
     candles: deque = field(default_factory=lambda: deque(maxlen=30))
     current_candle: Candle | None = None
     _running: bool = False
+    trade_callbacks: list = field(default_factory=list)
 
     async def start(self):
         self._running = True
@@ -52,9 +55,21 @@ class BinanceFeed:
                     async for msg in ws:
                         if not self._running:
                             break
+                        recv_at = time.time()
                         data = json.loads(msg)
                         self.price = float(data["p"])
                         self.price_time = data["T"] / 1000.0
+                        self.received_at = recv_at
+                        # Notify trade callbacks (for taker ratio signal)
+                        if self.trade_callbacks:
+                            qty = float(data["q"])
+                            is_taker_buy = data["m"]  # m=True -> seller is maker -> taker BUY
+                            ts = data["T"] / 1000.0
+                            for cb in self.trade_callbacks:
+                                try:
+                                    cb(qty, is_taker_buy, ts)
+                                except Exception:
+                                    pass
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
                 if not self._running:
                     break

@@ -6,11 +6,12 @@ agree on direction, signal confidence is higher.
 """
 
 import asyncio
-import json
 import logging
 import time
 
 import websockets
+
+from core import fast_json as json
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,8 @@ class CoinbaseFeed:
 
     def __init__(self):
         self.price: float = 0.0
-        self.price_time: float = 0.0
+        self.price_time: float = 0.0    # Exchange-side timestamp (parsed from msg)
+        self.received_at: float = 0.0   # Our local time when message arrived
         self.bid: float = 0.0
         self.ask: float = 0.0
         self._running: bool = False
@@ -32,7 +34,10 @@ class CoinbaseFeed:
 
     @property
     def is_connected(self) -> bool:
-        return self.price > 0 and (time.time() - self.price_time) < 10
+        # Use received_at (local) for staleness — price_time can drift if
+        # the exchange clock differs slightly from ours.
+        ref = self.received_at or self.price_time
+        return self.price > 0 and ref > 0 and (time.time() - ref) < 10
 
     @property
     def price_direction(self) -> float:
@@ -75,9 +80,10 @@ class CoinbaseFeed:
                     async for msg in ws:
                         if not self._running:
                             break
+                        recv_at = time.time()
                         data = json.loads(msg)
                         if data.get("type") == "ticker":
-                            self._handle_ticker(data)
+                            self._handle_ticker(data, recv_at)
 
             except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
                 if not self._running:
@@ -92,12 +98,24 @@ class CoinbaseFeed:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 
-    def _handle_ticker(self, data: dict):
+    def _handle_ticker(self, data: dict, recv_at: float = 0.0):
         px = data.get("price")
         if px:
             self.price = float(px)
-            self.price_time = time.time()
-            self._price_history.append((self.price_time, self.price))
+            self.received_at = recv_at or time.time()
+            # Parse exchange-side timestamp from "time" field (ISO 8601)
+            ts_str = data.get("time", "")
+            if ts_str:
+                try:
+                    if ts_str.endswith("Z"):
+                        ts_str = ts_str[:-1] + "+00:00"
+                    from datetime import datetime as _dt
+                    self.price_time = _dt.fromisoformat(ts_str).timestamp()
+                except Exception:
+                    self.price_time = self.received_at
+            else:
+                self.price_time = self.received_at
+            self._price_history.append((self.received_at, self.price))
             if len(self._price_history) > self._max_history:
                 self._price_history = self._price_history[-self._max_history:]
         bid = data.get("best_bid")

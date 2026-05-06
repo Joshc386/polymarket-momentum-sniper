@@ -15,13 +15,14 @@ Data contract (LiquidationStats):
 """
 
 import asyncio
-import json
 import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
 
 import websockets
+
+from core import fast_json as json
 
 logger = logging.getLogger(__name__)
 
