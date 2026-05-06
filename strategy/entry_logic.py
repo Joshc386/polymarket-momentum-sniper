@@ -13,6 +13,7 @@ class EntryDecision:
     ev_yes: float = 0.0
     ev_no: float = 0.0
     best_ev: float = 0.0
+    prob_edge: float = 0.0  # |model_prob - market_prob| — the real edge metric
     required_edge: float = 0.0
     signal_confidence: float = 0.0
     reason: str = ""
@@ -64,6 +65,7 @@ class EntryLogic:
         seconds_remaining: float,
         has_position: bool,
         regime_edge_multiplier: float = 1.0,
+        signal_aligned: bool = False,
     ) -> EntryDecision:
         """Evaluate whether to enter a position.
 
@@ -77,6 +79,10 @@ class EntryLogic:
             has_position: Whether we already have a position this window.
             regime_edge_multiplier: Multiplier on required edge from regime
                 detector (>1.0 = need more edge, <1.0 = accept less).
+            signal_aligned: When True, pick side by signal direction
+                (est_prob_up > 0.5 -> YES) instead of fading the market.
+                Use in ranging regimes where the contrarian logic inverts
+                the signal and destroys edge.
 
         Returns:
             EntryDecision with trade details if we should enter.
@@ -117,9 +123,50 @@ class EntryLogic:
         required_edge *= regime_edge_multiplier
         decision.required_edge = required_edge
 
-        # EV calculations
-        # Polymarket fee is charged on WINNINGS only (not on losses).
-        # fee_adjustment is a rate (0.02 = 2%), applied to profit if we win.
+        # ── Market-implied probability from orderbook midpoint ──
+        # The midpoint is a better estimate than the ask alone because
+        # the ask includes the spread.
+        market_mid_yes = (yes_best_bid + yes_best_ask) / 2.0
+        market_prob_up = max(0.05, min(0.95, market_mid_yes))
+
+        # ── Probability edge: how much our model disagrees with the market ──
+        # This is the TRUE edge metric. Raw dollar-EV is misleading because
+        # cheap tokens ($0.25) produce huge EV even with negligible conviction.
+        # Probability edge normalises across all price levels.
+        prob_edge_yes = est_prob_up - market_prob_up         # >0 -> model is more bullish
+        prob_edge_no = (1.0 - est_prob_up) - (1.0 - market_prob_up)  # = -prob_edge_yes
+
+        # Pick the side to trade.
+        # Default (contrarian): disagree with the market the most — fade
+        #   overbought/oversold odds. Works in trending regimes.
+        # Signal-aligned: follow the model's directional call — if est_prob_up
+        #   > 0.5, buy YES. Fixes the ranging regime problem where contrarian
+        #   logic inverts a correct signal (55.9% accurate -> 43.5% side hit).
+        if signal_aligned:
+            # Follow the signal direction, not the market disagreement
+            if est_prob_up >= 0.5:
+                side = "YES"
+                price = yes_best_ask
+            else:
+                side = "NO"
+                price = no_best_ask
+            # Edge is still the magnitude of model-market disagreement
+            # (used for threshold gating, not side selection)
+            prob_edge = abs(prob_edge_yes)
+        else:
+            # Contrarian: pick the side where we disagree with market most
+            if prob_edge_yes >= 0:
+                side = "YES"
+                prob_edge = prob_edge_yes
+                price = yes_best_ask
+            else:
+                side = "NO"
+                prob_edge = abs(prob_edge_no)
+                price = no_best_ask
+
+        decision.prob_edge = prob_edge
+
+        # EV calculations (kept for logging and dashboard, not for entry gate)
         yes_price = yes_best_ask
         profit_yes = 1.0 - yes_price
         ev_yes = (est_prob_up * (profit_yes * (1.0 - self.fee_adjustment))) - ((1.0 - est_prob_up) * yes_price)
@@ -130,32 +177,29 @@ class EntryLogic:
 
         decision.ev_yes = ev_yes
         decision.ev_no = ev_no
-
-        # Pick whichever side has better EV — this buys the cheap contrarian
-        # side when the market has overreacted.  Early paper trading showed
-        # 39% WR but +315% ROI with this approach because wins on cheap tokens
-        # pay $0.85 while losses cost $0.15.  The corrected fee formula (rate
-        # on winnings only, not flat penalty) now gives accurate EV for both sides.
-        if ev_yes >= ev_no:
-            side = "YES"
-            best_ev = ev_yes
-            price = yes_price
-        else:
-            side = "NO"
-            best_ev = ev_no
-            price = no_price
-
+        best_ev = ev_yes if side == "YES" else ev_no
         decision.best_ev = best_ev
 
-        if best_ev > required_edge:
+        # ── Entry gate: probability edge must exceed dynamic threshold ──
+        # required_edge is now in probability units (e.g. 0.04 = 4% disagreement)
+        if prob_edge > required_edge and best_ev > 0:
             decision.should_enter = True
             decision.side = side
             decision.price = price
             decision.reason = (
-                f"EV {best_ev:.4f} > {required_edge:.4f} | "
+                f"Edge {prob_edge:.3f} > {required_edge:.3f} "
+                f"(EV ${best_ev:.4f}) | "
                 f"conf={signal_confidence:.3f} | {seconds_remaining:.0f}s left"
             )
         else:
-            decision.reason = f"EV {best_ev:.4f} < threshold {required_edge:.4f}"
+            if best_ev <= 0:
+                decision.reason = (
+                    f"Negative EV ({best_ev:.4f}) | "
+                    f"edge={prob_edge:.3f}"
+                )
+            else:
+                decision.reason = (
+                    f"Edge {prob_edge:.3f} < threshold {required_edge:.3f}"
+                )
 
         return decision
