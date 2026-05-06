@@ -186,6 +186,67 @@ class MarketDiscovery:
             except Exception:
                 return None
 
+    async def fetch_resolution(self, slug: str) -> str:
+        """Fetch the actual resolution of a completed market.
+
+        Reads the outcomePrices from the Gamma API to determine if
+        the market resolved UP or DOWN. This is authoritative — it's
+        the actual on-chain resolution, not a price comparison.
+
+        Args:
+            slug: Market slug (e.g. 'btc-updown-5m-1713100800').
+
+        Returns:
+            'UP', 'DOWN', or 'UNKNOWN' if resolution can't be determined.
+        """
+        try:
+            resp = await self._http_client.get(
+                f"{GAMMA_API_BASE}/events",
+                params={"slug": slug},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data:
+                return "UNKNOWN"
+
+            event = data[0] if isinstance(data, list) else data
+            markets = event.get("markets", [])
+            if not markets:
+                return "UNKNOWN"
+
+            m = markets[0]
+
+            # outcomePrices: ["1", "0"] means UP won, ["0", "1"] means DOWN won
+            outcome_prices = m.get("outcomePrices")
+            if isinstance(outcome_prices, str):
+                import json
+                outcome_prices = json.loads(outcome_prices)
+
+            if outcome_prices and len(outcome_prices) >= 2:
+                try:
+                    up_price = float(outcome_prices[0])
+                    down_price = float(outcome_prices[1])
+                    if up_price > 0.9:
+                        return "UP"
+                    if down_price > 0.9:
+                        return "DOWN"
+                except (ValueError, TypeError):
+                    pass
+
+            # Fallback: check if market has a resolved state
+            resolved = m.get("resolved", False)
+            if not resolved:
+                logger.debug(f"Market {slug} not yet resolved")
+                return "UNKNOWN"
+
+            logger.warning(f"Market {slug} resolved but can't determine winner")
+            return "UNKNOWN"
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch resolution for {slug}: {e}")
+            return "UNKNOWN"
+
     async def refresh(self) -> MarketInfo | None:
         """Re-discover the active market. Call periodically."""
         # If current market expired, promote next to current

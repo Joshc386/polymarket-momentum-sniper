@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeRecord:
-    """A completed (or pending) trade."""
+    """A completed (or pending) trade with full condition snapshot."""
     market_id: str
     market_slug: str
     side: str               # "YES" or "NO"
@@ -36,11 +36,26 @@ class TradeRecord:
     oracle_price_at_entry: float
     oracle_price_at_open: float
     is_paper: bool
+    # Enriched snapshot fields
+    orderbook_signal: float = 0.0
+    sentiment_signal: float = 0.0
+    coinbase_direction: float = 0.0
+    regime: str = ""
+    regime_confidence: float = 0.0
+    risk_size_multiplier: float = 1.0
+    consecutive_losses: int = 0
+    signal_weights: str = ""           # JSON string
+    ob_spread: float = 0.0
+    ob_yes_depth: float = 0.0
+    ob_ask_depth: float = 0.0
+    session_trade_num: int = 0
+    # Outcome fields
     resolution: str | None = None  # "UP" or "DOWN" or None
     pnl: float | None = None
     db_id: int | None = None
     order_id: str | None = None
     created_at: str = field(default="", init=False)
+    resolved_at: str = field(default="", init=False)
 
     def __post_init__(self) -> None:
         """Auto-populate created_at with current UTC timestamp."""
@@ -83,12 +98,26 @@ def _log_to_db(db, trade, is_paper: bool) -> int:
         oracle_price_at_open=trade.oracle_price_at_open,
         fill_price=trade.entry_price,
         order_id=trade.order_id,
+        # Enriched snapshot
+        orderbook_signal=trade.orderbook_signal,
+        sentiment_signal=trade.sentiment_signal,
+        coinbase_direction=trade.coinbase_direction,
+        regime=trade.regime,
+        regime_confidence=trade.regime_confidence,
+        risk_size_multiplier=trade.risk_size_multiplier,
+        consecutive_losses=trade.consecutive_losses,
+        signal_weights=trade.signal_weights,
+        ob_spread=trade.ob_spread,
+        ob_yes_depth=trade.ob_yes_depth,
+        ob_ask_depth=trade.ob_ask_depth,
+        session_trade_num=trade.session_trade_num,
     )
 
 
 def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
     """Compute P&L for a trade. Returns True if won."""
     trade.resolution = resolution
+    trade.resolved_at = datetime.now(timezone.utc).isoformat()
     won = (trade.side == "YES" and resolution == "UP") or \
           (trade.side == "NO" and resolution == "DOWN")
 
@@ -131,6 +160,32 @@ class PaperExecutionEngine:
         self.session_pnl = 0.0
         self.is_paper = True
 
+    def restore_from_db(self) -> None:
+        """Log all-time stats on startup for reference.
+
+        Bankroll, session trades, and equity curve all start fresh.
+        All trades remain stored in the database for historical analysis.
+        """
+        if not self.db.conn:
+            return
+
+        # Log all-time stats for reference only
+        row = self.db.conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) as total_pnl, "
+            "       COUNT(*) as total_trades, "
+            "       SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins, "
+            "       SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses "
+            "FROM trades WHERE is_paper = 1 AND pnl IS NOT NULL"
+        ).fetchone()
+
+        if row and row[1] > 0:
+            logger.info(
+                f"All-time paper stats: {row[1]} trades, "
+                f"{row[2]}W/{row[3]}L, P&L=${row[0]:+.2f}"
+            )
+
+        logger.info(f"New session started: bankroll=${self.bankroll:.2f}")
+
     def execute_paper_trade(
         self,
         side: str,
@@ -149,6 +204,19 @@ class PaperExecutionEngine:
         btc_price: float,
         oracle_price: float,
         oracle_open_price: float,
+        # Enriched snapshot fields
+        orderbook_signal: float = 0.0,
+        sentiment_signal: float = 0.0,
+        coinbase_direction: float = 0.0,
+        regime: str = "",
+        regime_confidence: float = 0.0,
+        risk_size_multiplier: float = 1.0,
+        consecutive_losses: int = 0,
+        signal_weights: str = "",
+        ob_spread: float = 0.0,
+        ob_yes_depth: float = 0.0,
+        ob_ask_depth: float = 0.0,
+        session_trade_num: int = 0,
     ) -> TradeRecord | None:
         """Simulate placing a trade. Returns TradeRecord if 'filled'."""
         fill_price = min(price + self.slippage, 0.99)
@@ -164,6 +232,13 @@ class PaperExecutionEngine:
             edge=edge, time_remaining_secs=time_remaining_secs,
             btc_price_at_entry=btc_price, oracle_price_at_entry=oracle_price,
             oracle_price_at_open=oracle_open_price, is_paper=True,
+            orderbook_signal=orderbook_signal, sentiment_signal=sentiment_signal,
+            coinbase_direction=coinbase_direction, regime=regime,
+            regime_confidence=regime_confidence,
+            risk_size_multiplier=risk_size_multiplier,
+            consecutive_losses=consecutive_losses, signal_weights=signal_weights,
+            ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
+            session_trade_num=session_trade_num,
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=True)
@@ -199,8 +274,8 @@ class PaperExecutionEngine:
 
         if trade.db_id and self.db.conn:
             self.db.conn.execute(
-                "UPDATE trades SET resolution = ?, pnl = ? WHERE id = ?",
-                (resolution, trade.pnl, trade.db_id),
+                "UPDATE trades SET resolution = ?, pnl = ?, resolved_at = ? WHERE id = ?",
+                (resolution, trade.pnl, trade.resolved_at, trade.db_id),
             )
             self.db.conn.commit()
 
@@ -208,6 +283,62 @@ class PaperExecutionEngine:
 
         logger.info(
             f"[PAPER] Resolved {resolution} | {trade.side} | "
+            f"{'WIN' if won else 'LOSS'} | P&L: ${trade.pnl:+.2f} | "
+            f"Bankroll: ${self.bankroll:.2f}"
+        )
+        return trade
+
+    def close_position_early(
+        self, exit_price: float, reason: str = ""
+    ) -> TradeRecord | None:
+        """Close pending position before resolution by selling shares.
+
+        Used by latency arb strategy for smart exits — sell when the
+        CLOB bid has moved above our entry price, locking in profit
+        without waiting for the 5-min window to resolve.
+
+        Args:
+            exit_price: Bid price we're selling at.
+            reason: Why we're exiting (e.g. "smart_exit_profit").
+
+        Returns:
+            Resolved TradeRecord with PnL, or None if no position.
+        """
+        trade = self.pending_trade
+        if not trade:
+            return None
+
+        trade.resolved_at = datetime.now(timezone.utc).isoformat()
+        trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
+
+        # PnL = (exit - entry) * shares, fee only on profit
+        gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
+        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
+        trade.pnl = gross_pnl - fee
+
+        won = trade.pnl > 0
+        if won:
+            self.session_wins += 1
+        else:
+            self.session_losses += 1
+
+        self.bankroll += trade.size_usdc + trade.pnl
+        self.session_pnl += trade.pnl
+        self.session_trades.append(trade)
+
+        if trade.db_id and self.db.conn:
+            self.db.conn.execute(
+                "UPDATE trades SET resolution = ?, pnl = ?, resolved_at = ? "
+                "WHERE id = ?",
+                (trade.resolution, trade.pnl, trade.resolved_at, trade.db_id),
+            )
+            self.db.conn.commit()
+
+        self.pending_trade = None
+
+        logger.info(
+            f"[PAPER] Early exit ({reason}) | {trade.side} @ "
+            f"${trade.entry_price:.4f} -> ${exit_price:.4f} | "
             f"{'WIN' if won else 'LOSS'} | P&L: ${trade.pnl:+.2f} | "
             f"Bankroll: ${self.bankroll:.2f}"
         )
@@ -282,6 +413,19 @@ class LiveExecutionEngine:
         oracle_open_price: float,
         yes_token_id: str = "",
         no_token_id: str = "",
+        # Enriched snapshot fields
+        orderbook_signal: float = 0.0,
+        sentiment_signal: float = 0.0,
+        coinbase_direction: float = 0.0,
+        regime: str = "",
+        regime_confidence: float = 0.0,
+        risk_size_multiplier: float = 1.0,
+        consecutive_losses: int = 0,
+        signal_weights: str = "",
+        ob_spread: float = 0.0,
+        ob_yes_depth: float = 0.0,
+        ob_ask_depth: float = 0.0,
+        session_trade_num: int = 0,
     ) -> TradeRecord | None:
         """Place a real order on Polymarket.
 
@@ -323,7 +467,13 @@ class LiveExecutionEngine:
             edge=edge, time_remaining_secs=time_remaining_secs,
             btc_price_at_entry=btc_price, oracle_price_at_entry=oracle_price,
             oracle_price_at_open=oracle_open_price, is_paper=False,
-            order_id=order_id,
+            orderbook_signal=orderbook_signal, sentiment_signal=sentiment_signal,
+            coinbase_direction=coinbase_direction, regime=regime,
+            regime_confidence=regime_confidence,
+            risk_size_multiplier=risk_size_multiplier,
+            consecutive_losses=consecutive_losses, signal_weights=signal_weights,
+            ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
+            session_trade_num=session_trade_num, order_id=order_id,
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=False)
@@ -457,8 +607,8 @@ class LiveExecutionEngine:
 
         if trade.db_id and self.db.conn:
             self.db.conn.execute(
-                "UPDATE trades SET resolution = ?, pnl = ? WHERE id = ?",
-                (resolution, trade.pnl, trade.db_id),
+                "UPDATE trades SET resolution = ?, pnl = ?, resolved_at = ? WHERE id = ?",
+                (resolution, trade.pnl, trade.resolved_at, trade.db_id),
             )
             self.db.conn.commit()
 
@@ -467,6 +617,63 @@ class LiveExecutionEngine:
 
         logger.info(
             f"[LIVE] Resolved {resolution} | {trade.side} | "
+            f"{'WIN' if won else 'LOSS'} | P&L: ${trade.pnl:+.2f} | "
+            f"Bankroll: ${self.bankroll:.2f}"
+        )
+        return trade
+
+    def close_position_early(
+        self, exit_price: float, reason: str = ""
+    ) -> TradeRecord | None:
+        """Close pending position before resolution (paper simulation).
+
+        For live trading, this would need to place a SELL order on the
+        CLOB. For now, it simulates the exit at the given price — same
+        as the paper engine. A proper live implementation would call
+        self.poly.place_order(side="SELL", ...) and wait for fill.
+
+        Args:
+            exit_price: Bid price we're selling at.
+            reason: Why we're exiting early.
+
+        Returns:
+            Resolved TradeRecord with PnL, or None if no position.
+        """
+        trade = self.pending_trade
+        if not trade:
+            return None
+
+        trade.resolved_at = datetime.now(timezone.utc).isoformat()
+        trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
+
+        gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
+        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
+        trade.pnl = gross_pnl - fee
+
+        won = trade.pnl > 0
+        if won:
+            self.session_wins += 1
+        else:
+            self.session_losses += 1
+
+        self.bankroll += trade.size_usdc + trade.pnl
+        self.session_pnl += trade.pnl
+        self.session_trades.append(trade)
+
+        if trade.db_id and self.db.conn:
+            self.db.conn.execute(
+                "UPDATE trades SET resolution = ?, pnl = ?, resolved_at = ? "
+                "WHERE id = ?",
+                (trade.resolution, trade.pnl, trade.resolved_at, trade.db_id),
+            )
+            self.db.conn.commit()
+
+        self.pending_trade = None
+        self.pending_order_id = None
+
+        logger.info(
+            f"[LIVE] Early exit ({reason}) | {trade.side} @ "
+            f"${trade.entry_price:.4f} -> ${exit_price:.4f} | "
             f"{'WIN' if won else 'LOSS'} | P&L: ${trade.pnl:+.2f} | "
             f"Bankroll: ${self.bankroll:.2f}"
         )

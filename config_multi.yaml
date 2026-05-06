@@ -1,0 +1,519 @@
+# Multi-Bot Runner Configuration
+# Run with: python multi_runner.py
+
+mode: paper
+
+market:
+  asset: btc
+  period: 5m
+
+# Shared data feed config
+coinalyze:
+  refresh_interval: 60
+
+liquidation:
+  refresh_interval_sec: 60
+
+telegram:
+  enabled: true
+  notify_every_trade: true
+  paper_prefix: "[MULTI] "
+
+logging:
+  log_level: INFO
+
+# ======================================================================
+#  BOT DEFINITIONS
+#  Each bot gets its own signals, entry logic, sizing, risk, and DB.
+# ======================================================================
+
+bots:
+  # -- Bot A: Baseline Contrarian EV (trades most often — the benchmark) --
+  bot_a_contrarian:
+    strategy: contrarian_ev
+    enabled: false   # Retired — poor WR in ranging, net negative PnL
+    db_path: ./data_runtime/bot_a_contrarian.db
+    # Flip signal direction on Sat/Sun — weekend markets are more efficient,
+    # the cheap side is cheap for a reason. Data shows 79% inverse WR.
+    weekend_flip: true
+
+    # MTF Regime Detector — calibrated via walk-forward (21 folds, 2yr data)
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      # Bot A affinity: contrarian works best in trending_down (43.7% WR, +$29)
+      # Sits out high_vol entirely (29.4% WR, -$82)
+      allowed_regimes: [trending_up, trending_down, ranging]
+      block_regimes: [high_vol, low_vol]
+
+    signals:
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.20
+
+    entry:
+      # Edge thresholds are now in probability units (how much model
+      # disagrees with market). Kept low so Bot A trades frequently
+      # like the original profitable strategy (~100+ trades/day).
+      min_edge: 0.01
+      max_edge: 0.06
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot C: HMM Regime EV (only trades during trending regimes) --
+  bot_c_hmm_regime:
+    strategy: hmm_regime_ev
+    enabled: false   # Retired — insufficient edge
+    db_path: ./data_runtime/bot_c_hmm_regime.db
+    weekend_flip: true
+
+    # Bot C keeps its own HMM regime detector (not MTF) — it's the
+    # comparison point. The HMM filter already restricts to trending only.
+    regime:
+      detector: hmm
+      # HMM-specific: Bot C's own classifier handles regime gating
+
+    signals:
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      hmm_regime:
+        transition_stickiness: 0.90
+        adaptation_rate: 0.02
+        min_candles: 16
+        feature_lookback: 5
+      max_adjustment: 0.20
+
+    entry:
+      # Same base thresholds as Bot A — the regime filter is what
+      # makes Bot C different, not higher thresholds.
+      min_edge: 0.01
+      max_edge: 0.06
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+      # HMM-specific: only enter during trending regimes
+      only_trending: true
+      min_regime_confidence: 0.40
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot B: Kalman Filter EV (selective — requires velocity confirmation) --
+  bot_b_kalman:
+    strategy: kalman_ev
+    enabled: false   # Retired — 28% WR, -$297 over 630 trades
+    db_path: ./data_runtime/bot_b_kalman.db
+    weekend_flip: true
+
+    # MTF Regime: Bot B loses in ALL regimes, but least in trending_down.
+    # Block high_vol and low_vol. Require stronger alignment for entry.
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down]
+      block_regimes: [high_vol, low_vol, ranging]
+
+    signals:
+      kalman_filter:
+        # OPTIMISED 2026-04-08: process_noise tightened (was 1e-5),
+        # oracle noise tightened (was 5e-4). Smoother state, trusts
+        # oracle more. Walk-forward OOS Sharpe +16.55, PnL +$292.
+        process_noise_scale: 5.0e-6
+        measurement_noise_binance: 1.0e-4
+        measurement_noise_coinbase: 2.0e-4
+        measurement_noise_oracle: 2.0e-4
+        adaptive_window: 30
+        breakout_velocity_threshold: 0.5
+        max_expected_lag: 0.001
+        velocity_confidence_boost: 1.15
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.20
+      # KF-dominant weight schedule — L1 Kalman gets 35-45% weight
+      # instead of the default 10-25%. This makes the KF the primary
+      # signal driver, not just a small contributor.
+      weight_schedule: kf_dominant
+
+    entry:
+      # OPTIMISED 2026-04-08: raised min_edge (was 0.02) and
+      # min_confidence (was 0.03) — more selective, only trades
+      # when the KF signal is strong. Cuts noise trades.
+      min_edge: 0.03
+      max_edge: 0.08
+      fee_adjustment: 0.02
+      min_confidence: 0.05
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+      # KF-specific: require velocity to confirm trade direction
+      require_velocity_confirm: true
+
+    sizing:
+      # OPTIMISED 2026-04-08: raised kelly (was 0.25) — size up
+      # when the optimised signal is confident.
+      kelly_multiplier: 0.35
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot D: Enhanced EV (improved signals — fork of Bot A) --
+  bot_d_enhanced:
+    strategy: enhanced_ev
+    enabled: false   # Retired — net negative PnL
+    db_path: ./data_runtime/bot_d_enhanced.db
+    weekend_flip: true
+
+    # MTF Regime: Bot D profitable in trending_down (46.8% WR, +$44).
+    # Marginal in ranging (-$33), terrible in high_vol (-$77).
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down, ranging]
+      block_regimes: [high_vol, low_vol]
+
+    signals:
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum_slope:
+        weight_30s: 0.35
+        weight_60s: 0.30
+        weight_120s: 0.20
+        weight_240s: 0.15
+        slope_normaliser: 10.0
+      cross_exchange:
+        rolling_window: 120
+        z_threshold: 1.5
+        max_spread_usd: 200.0
+      funding_filter:
+        mild_threshold: 0.01
+        high_threshold: 0.05
+        stress_threshold: 0.10
+      max_adjustment: 0.20
+
+    entry:
+      min_edge: 0.01
+      max_edge: 0.06
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot E: OU Mean Reversion (trades Binance-Oracle spread reversion) --
+  bot_e_ou_reversion:
+    strategy: ou_reversion_ev
+    enabled: false   # Retired — net negative PnL
+    db_path: ./data_runtime/bot_e_ou_reversion.db
+    weekend_flip: true
+
+    # MTF Regime: Bot E best performer in trending_down (51.5% WR, +$69).
+    # OU reversion shines when there's a clear trend to revert to.
+    # Block high_vol (too noisy for mean reversion) and low_vol (no edge).
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down]
+      block_regimes: [high_vol, low_vol, ranging]
+
+    signals:
+      ou_spread:
+        calibration_window: 300
+        min_observations: 60
+        entry_z_threshold: 1.5
+        dt: 1.0
+      momentum_slope:
+        weight_30s: 0.35
+        weight_60s: 0.30
+        weight_120s: 0.20
+        weight_240s: 0.15
+        slope_normaliser: 10.0
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.20
+
+    entry:
+      min_edge: 0.01
+      max_edge: 0.06
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+      # OU-specific: require minimum z-score before considering entry
+      min_ou_z_score: 1.5
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot G: Signal-Aligned Contrarian (replaces standalone main.py) --
+  # Same signal engine as Bot A but follows signal direction in ranging
+  # markets instead of fading the market. Uses main.py's tighter edge
+  # thresholds. Shares feeds with all other bots via multi_runner.
+  bot_g_signal_aligned:
+    strategy: contrarian_ev
+    enabled: true
+    db_path: ./data_runtime/bot_g_signal_aligned.db
+    weekend_flip: true
+
+    # Data-driven filters from 1,321-trade review (Apr 14-24):
+    # - YES bets < $0.40: lost $157 over 611 trades
+    # - trending_down regime: 34% WR (below break-even), -$69 total
+    # Set yes_min_price to 0 and skip_regimes to [] to disable.
+    filters:
+      yes_min_price: 0.40
+      skip_regimes: [trending_down]
+
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down, ranging]
+      block_regimes: [high_vol, low_vol]
+
+    signals:
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.20
+
+    entry:
+      min_edge: 0.003
+      max_edge: 0.025
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
+  # -- Bot F: Latency Arbitrage (exploits Binance->CLOB delay) --
+  # Fundamentally different from Bots A-E: no signal prediction.
+  # Detects real-time Binance moves, buys stale CLOB odds, exits
+  # when odds adjust (smart exit) or holds to resolution.
+  # Backtested: 71% WR hold-to-resolution, 98.7% smart exit profitable.
+  bot_f_latency_arb:
+    strategy: latency_arb
+    # DISABLED 2026-05-01 after -$350 paper PnL across 1,265 trades.
+    # Strategy thesis (Binance->CLOB lag exploitation) doesn't have edge
+    # at our position in the food chain. Latency pipeline confirmed fine
+    # (~12ms submission, 67ms processing); the edge simply isn't there.
+    # Code/config preserved for reference.
+    enabled: false
+    db_path: ./data_runtime/bot_f_latency_arb.db
+
+    # Move detection - triggers on significant Binance price moves
+    move_detection:
+      threshold_bps: 3.0        # Min move in basis points (~$24 at $80K BTC)
+      lookback_secs: 10.0       # Compare price to 10 seconds ago
+      cooldown_secs: 20.0       # No double-detection within 20s
+      min_clob_gap_bps: 1.0     # CLOB must be lagging by at least 1bps
+
+    entry:
+      max_entry_price: 0.55     # Only enter when odds are stale (< $0.55)
+      fok_slippage: 0.005       # Slippage for paper fills
+      earliest_entry_secs: 270  # Can enter from 4:30 into window
+      latest_entry_secs: 30     # Stop entering with <30s left
+      max_trades_per_window: 5  # Max trades per 5-min window
+      re_entry_cooldown_secs: 15  # Seconds to wait after exit before re-entry
+      primary_exchange: coinbase  # 8ms RTT vs binance 234ms (Tokyo)
+
+    exit:
+      mode: smart                    # "smart" = use exit logic below
+      min_profit_ticks: 0.04         # Require meaningful CLOB reprice (was 0.01)
+      max_loss_pct: 0.30             # Tighter loss cut — caps loss ~$1.50 (was 0.60)
+      max_hold_secs: 60.0            # Exit if neither hit in 60s (new)
+      trailing_lock_ticks: 0.06      # Arm trailing stop after +$0.06 gain (new)
+      trailing_giveback_ticks: 0.02  # Exit if pulls back $0.02 from peak (new)
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
