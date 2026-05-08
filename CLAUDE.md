@@ -21,6 +21,41 @@ A trading bot targeting Polymarket's 5-minute Bitcoin Up/Down markets. Uses a th
 
 ---
 
+## Session Lifecycle (project-wide rule)
+
+### At the start of every new session
+
+Before responding to the user's first substantive request, read these files in order:
+
+1. `C:\Users\joshc\OneDrive\Desktop\Vault\Projects\5min BTC Bot\to-do.md`
+   — specifically the **"Tomorrow's session — start here"** section if it exists, plus the **"Active — current sprint"** section
+2. `C:\Users\joshc\OneDrive\Desktop\Vault\Projects\5min BTC Bot\BTC5Min_index.md`
+   — for current bot status and recent context
+3. The "Documentation Discipline" section below for the rule on
+   updating notes alongside changes
+
+Briefly acknowledge what's queued for this session (one or two sentences) before continuing. Do NOT do this if the user's first message clearly defines a different task — defer to user direction in that case.
+
+If the "Tomorrow's session" section in `to-do.md` is stale (more than 2 days old), treat it as advisory rather than authoritative.
+
+### When the user expresses future intent
+
+Whenever the user says any of:
+- "I will [do X] [later/tomorrow/next session]"
+- "we should [do X] [later/at some point]"
+- "let's [do X] after [Y]"
+- "remind me to [X]"
+- "queue [X] for later"
+- "next time we should..."
+
+…immediately add the item to `to-do.md` (in the appropriate section based on its nature and timing) **before** continuing the conversation. Do this in the same response, not in a separate one.
+
+If the timing is "tomorrow" or "next session" specifically, add it to the "Tomorrow's session — start here" section at the top of `to-do.md` (creating that section if absent).
+
+If the user is just thinking out loud and not actually committing to action, skip the capture — but err on the side of capturing. It's cheaper to remove a captured item than to forget one.
+
+---
+
 ## Documentation Discipline (project-wide rule)
 
 The project's living memory lives in the user's Obsidian vault at:
