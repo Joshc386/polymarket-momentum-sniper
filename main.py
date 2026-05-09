@@ -1126,8 +1126,14 @@ async def main():
                                 check_minute=current_minute,
                             )
 
-                        # Execute early exit if SM disagrees
-                        if sm_decision == SMDecision.EXIT:
+                        # Execute early exit if SM disagrees AND side is eligible
+                        if sm_decision == SMDecision.EXIT and trade_side not in config.sm_exit_sides:
+                            logger.info(
+                                "L9 EXIT suppressed: %s side not in exit_sides %s",
+                                trade_side, config.sm_exit_sides,
+                            )
+                            sm_l9_status += " (side-filtered)"
+                        elif sm_decision == SMDecision.EXIT:
                             exit_price = market_price
                             trade = executor.close_position_early(
                                 exit_price=exit_price,

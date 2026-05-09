@@ -189,7 +189,7 @@ async def main() -> None:
         )
         logger.info(
             "Shared SM trade monitor created (poll every %.1fs, %d wallets)",
-            sm_poll_interval, len(sm_registry),
+            sm_poll_interval, sm_registry.wallet_count,
         )
 
     # ── Instantiate bots ──────────────────────────────────────────────

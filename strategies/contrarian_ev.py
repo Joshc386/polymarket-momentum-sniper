@@ -183,11 +183,14 @@ class ContrarianEvStrategy:
                 min_sm_wallets=sm_cfg.get("min_wallets", 2),
             )
             self._sm_decision_logger = SMDecisionLogger()
-            self._sm_check_minutes = sm_cfg.get("check_minutes", [3, 4])
+            self._sm_check_minutes = sm_cfg.get("check_minutes", [4])
+            self._sm_exit_sides: set[str] = set(
+                sm_cfg.get("exit_sides", ["YES"])
+            )
             logger.info(
                 "[%s] L9 SM confirmation enabled (check min %s, "
-                "threshold %.0f%%)",
-                name, self._sm_check_minutes,
+                "exit sides %s, threshold %.0f%%)",
+                name, self._sm_check_minutes, self._sm_exit_sides,
                 sm_cfg.get("agreement_threshold", 0.60) * 100,
             )
         elif self._sm_enabled and not self._sm_monitor:
@@ -496,7 +499,15 @@ class ContrarianEvStrategy:
                     check_minute=current_minute,
                 )
 
-            # Execute early exit if SM disagrees
+            # Execute early exit if SM disagrees AND side is eligible
+            if sm_decision == SMDecision.EXIT and trade_side not in self._sm_exit_sides:
+                logger.info(
+                    "[%s] L9 EXIT suppressed: %s side not in exit_sides %s",
+                    self.name, trade_side, self._sm_exit_sides,
+                )
+                self._sm_l9_status += " (side-filtered)"
+                return
+
             if sm_decision == SMDecision.EXIT:
                 exit_trade = self._executor.close_position_early(
                     exit_price=market_price,

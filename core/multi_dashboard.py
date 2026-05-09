@@ -265,6 +265,21 @@ def _build_bot_panel(state: dict) -> list[str]:
             f"${pending['size_usdc']:.2f}  {DIM}|{RESET}"
         )
 
+    # L9 SM Confirmation status
+    if state.get("l9_enabled"):
+        l9_text = state.get("l9_status", "")
+        if l9_text:
+            # Colour based on decision
+            if "EXIT" in l9_text:
+                l9_colour = RED
+            elif "HOLD" in l9_text:
+                l9_colour = GREEN
+            else:
+                l9_colour = DIM
+            lines.append(f"{DIM}|{RESET} {l9_colour}L9: {l9_text}{RESET}  {DIM}|{RESET}")
+        else:
+            lines.append(f"{DIM}|{RESET} {DIM}L9: waiting{RESET}  {DIM}|{RESET}")
+
     # Recent trades (last 3)
     recent = state.get("recent_trades", [])[-3:]
     for t in recent:

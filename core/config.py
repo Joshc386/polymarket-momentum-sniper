@@ -92,12 +92,13 @@ class Config:
 
     # SM Confirmation (L9)
     sm_confirmation_enabled: bool = False
-    sm_check_minutes: list[int] = field(default_factory=lambda: [3, 4])
+    sm_check_minutes: list[int] = field(default_factory=lambda: [4])
+    sm_exit_sides: list[str] = field(default_factory=lambda: ["YES"])
     sm_agreement_threshold: float = 0.60
-    sm_min_volume: float = 100.0
-    sm_min_wallets: int = 2
-    sm_price_floor: float = 0.65
-    sm_price_ceiling: float = 0.80
+    sm_min_volume: float = 50.0
+    sm_min_wallets: int = 0
+    sm_price_floor: float = 0.35
+    sm_price_ceiling: float = 0.65
     sm_poll_interval: float = 3.0
 
     # Logging
@@ -195,6 +196,7 @@ class Config:
         if isinstance(sm, dict):
             c.sm_confirmation_enabled = sm.get("enabled", c.sm_confirmation_enabled)
             c.sm_check_minutes = sm.get("check_minutes", c.sm_check_minutes)
+            c.sm_exit_sides = sm.get("exit_sides", c.sm_exit_sides)
             c.sm_agreement_threshold = sm.get("agreement_threshold", c.sm_agreement_threshold)
             c.sm_min_volume = sm.get("min_volume", c.sm_min_volume)
             c.sm_min_wallets = sm.get("min_wallets", c.sm_min_wallets)
