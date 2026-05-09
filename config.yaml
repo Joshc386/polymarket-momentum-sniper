@@ -70,6 +70,16 @@ regime:
   allowed_regimes: [trending_up, trending_down, ranging]
   block_regimes: [high_vol, low_vol]
 
+sm_confirmation:
+  enabled: false                 # L9: SM wallet confirmation layer (Phase 4)
+  check_minutes: [3, 4]          # Minutes within window to check SM flow
+  agreement_threshold: 0.60      # 60%+ SM dollars on same side = agreement
+  min_volume: 100.0              # Minimum SM dollar flow to act on
+  min_wallets: 2                 # Minimum distinct SM wallets required
+  price_floor: 0.65              # Below this, SM signal is noise — IGNORE
+  price_ceiling: 0.80            # Above this, market already decided — IGNORE
+  poll_interval: 3.0             # Seconds between Polygon RPC polls
+
 telegram:
   enabled: true
   notify_every_trade: true

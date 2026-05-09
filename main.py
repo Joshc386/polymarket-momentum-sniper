@@ -48,6 +48,13 @@ from strategy.mtf_regime_detector import MTFRegimeDetector
 from strategy.event_calendar import EventCalendar
 from notifications.telegram import TelegramNotifier
 from logging_db.database import Database
+from data.sm_wallets import SMWalletRegistry
+from data.sm_trade_monitor import SMTradeMonitor
+from strategy.sm_confirmation import (
+    SMConfirmationConfig, SMFlowState, PositionSide, SMDecision,
+    check_sm_confirmation,
+)
+from strategy.sm_decision_log import SMDecisionLogger
 
 # ── Logging setup ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -499,6 +506,35 @@ async def main():
     regime_blocked = set(regime_cfg.get("block_regimes", []))
     event_calendar = EventCalendar(buffer_minutes=15)
 
+    # SM Confirmation Layer (L9) — optional, off by default
+    sm_monitor = None
+    sm_decision_logger = None
+    sm_config = None
+    sm_last_checked_minute = -1  # prevent double-checking same minute
+    sm_l9_status = ""  # dashboard status string
+    if config.sm_confirmation_enabled:
+        sm_registry = SMWalletRegistry()
+        sm_monitor = SMTradeMonitor(
+            _sm_registry=sm_registry,
+            _rpcs=[config.polygon_rpc_url] if config.polygon_rpc_url else [],
+        )
+        sm_decision_logger = SMDecisionLogger()
+        sm_config = SMConfirmationConfig(
+            price_floor=config.sm_price_floor,
+            price_ceiling=config.sm_price_ceiling,
+            agreement_threshold=config.sm_agreement_threshold,
+            min_sm_volume=config.sm_min_volume,
+            min_sm_wallets=config.sm_min_wallets,
+        )
+        logger.info(
+            "L9 SM confirmation enabled (check minutes %s, "
+            "threshold %.0f%%, price zone $%.2f-$%.2f)",
+            config.sm_check_minutes,
+            config.sm_agreement_threshold * 100,
+            config.sm_price_floor,
+            config.sm_price_ceiling,
+        )
+
     # Execution — select engine based on mode
     is_live = config.mode == "live"
     if is_live:
@@ -563,6 +599,11 @@ async def main():
     )
     coinalyze_task = asyncio.create_task(coinalyze.start())
     binance_liq_task = asyncio.create_task(binance_liqs.start())
+    sm_monitor_task = None
+    if sm_monitor:
+        sm_monitor_task = asyncio.create_task(
+            sm_monitor.start(poll_interval=config.sm_poll_interval)
+        )
 
     logger.info("Waiting for data feeds...")
     for _ in range(50):
@@ -712,9 +753,15 @@ async def main():
                 # New window setup
                 last_window_slug = mkt.slug
                 has_position_this_window = False
+                sm_last_checked_minute = -1  # Reset L9 check gate
+                sm_l9_status = ""
                 ob_signal.reset()  # Reset L4 history for new window
                 ob_fade_signal.reset()  # Reset L6 fade history
                 binance_liqs.reset()  # Reset live liq stats for new window
+                if sm_monitor and mkt.yes_token_id and mkt.no_token_id:
+                    sm_monitor.set_market(
+                        mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                    )
                 if oracle.price > 0:
                     oracle.set_window_open_price()
                 else:
@@ -1012,6 +1059,107 @@ async def main():
                 current_weights = (0.0, 0.0, 0.0, 0.0, 0.0)
                 entry_decision = EntryDecision(reason="No active market")
 
+            # ── L9: SM Confirmation checkpoint ──
+            # Check at configured minutes (default: 3, 4) when we hold a position.
+            # Only fires once per minute to avoid spamming.
+            if (
+                sm_monitor
+                and mkt
+                and mkt.is_active
+                and executor.pending_trade
+                and has_position_this_window
+            ):
+                minutes_elapsed = (300 - mkt.seconds_remaining) / 60.0
+                current_minute = int(minutes_elapsed)
+                if (
+                    current_minute in config.sm_check_minutes
+                    and current_minute != sm_last_checked_minute
+                ):
+                    sm_last_checked_minute = current_minute
+                    try:
+                        sm_flow = sm_monitor.get_flow_state()
+                        trade_side = executor.pending_trade.side  # "YES" or "NO"
+                        position_side = (
+                            PositionSide.YES if trade_side == "YES"
+                            else PositionSide.NO
+                        )
+
+                        # Market price = current best bid for our side
+                        ob = orderbook_mgr.last_summary
+                        if ob:
+                            market_price = (
+                                ob.yes_best_bid if trade_side == "YES"
+                                else ob.no_best_bid
+                            )
+                        else:
+                            market_price = executor.pending_trade.entry_price
+
+                        sm_decision = check_sm_confirmation(
+                            position_side=position_side,
+                            market_price=market_price,
+                            flow=sm_flow,
+                            config=sm_config,
+                        )
+
+                        sm_l9_status = (
+                            f"L9@min{current_minute}: {sm_decision.value} "
+                            f"(Y${sm_flow.yes_volume:.0f}/N${sm_flow.no_volume:.0f}, "
+                            f"{sm_flow.num_wallets}w)"
+                        )
+                        logger.info(
+                            "L9 SM check at min %d: %s | flow Y=$%.0f N=$%.0f | "
+                            "%d wallets | price=$%.4f | position=%s",
+                            current_minute, sm_decision.value,
+                            sm_flow.yes_volume, sm_flow.no_volume,
+                            sm_flow.num_wallets, market_price, trade_side,
+                        )
+
+                        # Log decision for threshold monitoring
+                        if sm_decision_logger:
+                            sm_decision_logger.log_decision(
+                                position_side=position_side,
+                                market_price=market_price,
+                                flow=sm_flow,
+                                decision=sm_decision,
+                                config=sm_config,
+                                market_id=mkt.condition_id,
+                                check_minute=current_minute,
+                            )
+
+                        # Execute early exit if SM disagrees
+                        if sm_decision == SMDecision.EXIT:
+                            exit_price = market_price
+                            trade = executor.close_position_early(
+                                exit_price=exit_price,
+                                reason=f"L9_SM_EXIT_min{current_minute}",
+                            )
+                            if trade:
+                                has_position_this_window = True  # Block re-entry
+                                won = trade.pnl is not None and trade.pnl > 0
+                                risk_mgr.record_result(trade.pnl or 0)
+                                tag = "LIVE" if is_live else "PAPER"
+                                last_trade_msg = (
+                                    f"{'V' if won else 'X'} [{tag}] {trade.side} "
+                                    f"L9 EXIT @ min{current_minute} "
+                                    f"${trade.pnl:+.2f}"
+                                )
+                                await telegram.notify_bot_event(
+                                    "L9 SM Early Exit",
+                                    f"Side: {trade.side} | "
+                                    f"P&L: ${trade.pnl:+.2f} | "
+                                    f"Min: {current_minute} | "
+                                    f"SM: Y${sm_flow.yes_volume:.0f}"
+                                    f"/N${sm_flow.no_volume:.0f}",
+                                )
+                                logger.warning(
+                                    "L9 SM EXIT executed at min %d: %s "
+                                    "P&L=$%.2f",
+                                    current_minute, trade.side,
+                                    trade.pnl or 0,
+                                )
+                    except Exception as e:
+                        logger.error("L9 SM check failed: %s", e, exc_info=True)
+
             # ── Log signal every tick ──
             if mkt and mkt.is_active:
                 try:
@@ -1126,13 +1274,20 @@ async def main():
         await coinglass.stop()
         await coinalyze.stop()
         await binance_liqs.stop()
+        if sm_monitor:
+            await sm_monitor.stop()
         binance_task.cancel()
         oracle_task.cancel()
         coinbase_task.cancel()
         coinglass_task.cancel()
         coinalyze_task.cancel()
         binance_liq_task.cancel()
-        for t in [binance_task, oracle_task, coinbase_task, coinglass_task, coinalyze_task, binance_liq_task]:
+        if sm_monitor_task:
+            sm_monitor_task.cancel()
+        _cleanup_tasks = [binance_task, oracle_task, coinbase_task, coinglass_task, coinalyze_task, binance_liq_task]
+        if sm_monitor_task:
+            _cleanup_tasks.append(sm_monitor_task)
+        for t in _cleanup_tasks:
             try:
                 await t
             except asyncio.CancelledError:
