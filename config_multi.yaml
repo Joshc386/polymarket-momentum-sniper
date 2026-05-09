@@ -464,6 +464,88 @@ bots:
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
 
+  # -- Bot K: Signal-Aligned + SM Confirmation (L9 layer) --
+  # Identical strategy to Bot G, with the L9 SM confirmation layer enabled.
+  # At minutes 3 and 4, checks on-chain SM wallet flow. If SM disagrees
+  # with the position, exits early. Backtest: +56.3% PnL, DD 32.4%->9.9%.
+  # Run alongside Bot G to compare performance with/without L9.
+  bot_k_sm_confirmation:
+    strategy: contrarian_ev
+    enabled: false   # Set true when ready to test
+    db_path: ./data_runtime/bot_k_sm_confirmation.db
+    weekend_flip: true
+
+    # L9: SM Confirmation Layer
+    sm_confirmation:
+      enabled: true
+      check_minutes: [3, 4]
+      agreement_threshold: 0.60
+      min_volume: 100.0
+      min_wallets: 2
+      price_floor: 0.65
+      price_ceiling: 0.80
+      poll_interval: 3.0
+
+    # Same filters as Bot G
+    filters:
+      yes_min_price: 0.40
+      skip_regimes: [trending_down]
+
+    # Same regime, signals, entry, sizing, risk as Bot G
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down, ranging]
+      block_regimes: [high_vol, low_vol]
+
+    signals:
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.20
+
+    entry:
+      min_edge: 0.003
+      max_edge: 0.025
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduce_at: 3
+      streak_reduce_factor: 0.75
+      streak_heavy_reduce_at: 5
+      streak_heavy_reduce_factor: 0.5
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+
   # -- Bot F: Latency Arbitrage (exploits Binance->CLOB delay) --
   # Fundamentally different from Bots A-E: no signal prediction.
   # Detects real-time Binance moves, buys stale CLOB odds, exits

@@ -29,6 +29,11 @@ from strategy.risk_manager import RiskManager
 from strategy.regime_detector import RegimeDetector, Regime
 from strategy.mtf_regime_detector import MTFRegimeDetector
 from strategy.event_calendar import EventCalendar
+from strategy.sm_confirmation import (
+    SMConfirmationConfig, SMDecision, PositionSide,
+    check_sm_confirmation,
+)
+from strategy.sm_decision_log import SMDecisionLogger
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +166,37 @@ class ContrarianEvStrategy:
         )
         self._executor.restore_from_db()
 
+        # L9: SM Confirmation Layer (optional, off by default)
+        sm_cfg = cfg.get("sm_confirmation", {})
+        self._sm_enabled = sm_cfg.get("enabled", False)
+        self._sm_monitor = cfg.get("_sm_monitor")  # injected by multi_runner
+        self._sm_config = None
+        self._sm_decision_logger = None
+        self._sm_last_checked_minute = -1
+        self._sm_l9_status = ""
+        if self._sm_enabled and self._sm_monitor:
+            self._sm_config = SMConfirmationConfig(
+                price_floor=sm_cfg.get("price_floor", 0.65),
+                price_ceiling=sm_cfg.get("price_ceiling", 0.80),
+                agreement_threshold=sm_cfg.get("agreement_threshold", 0.60),
+                min_sm_volume=sm_cfg.get("min_volume", 100.0),
+                min_sm_wallets=sm_cfg.get("min_wallets", 2),
+            )
+            self._sm_decision_logger = SMDecisionLogger()
+            self._sm_check_minutes = sm_cfg.get("check_minutes", [3, 4])
+            logger.info(
+                "[%s] L9 SM confirmation enabled (check min %s, "
+                "threshold %.0f%%)",
+                name, self._sm_check_minutes,
+                sm_cfg.get("agreement_threshold", 0.60) * 100,
+            )
+        elif self._sm_enabled and not self._sm_monitor:
+            logger.warning(
+                "[%s] SM confirmation enabled in config but no SM monitor "
+                "available — L9 disabled", name,
+            )
+            self._sm_enabled = False
+
         # Per-window state
         self._has_position = False
         self._entry_decision = EntryDecision()
@@ -191,6 +227,8 @@ class ContrarianEvStrategy:
         self._orderbook.reset()
         self._orderbook_fade.reset()
         self._clob_flow.reset()
+        self._sm_last_checked_minute = -1
+        self._sm_l9_status = ""
 
     def on_tick(self, snapshot: DataSnapshot) -> None:
         """Compute signals, evaluate entry, execute trade if warranted."""
@@ -380,6 +418,107 @@ class ContrarianEvStrategy:
         elif not ob:
             self._entry_decision = EntryDecision(reason="No orderbook data")
 
+        # ── L9: SM Confirmation checkpoint ──
+        if (
+            self._sm_enabled
+            and self._sm_monitor
+            and self._has_position
+            and self._executor.pending_trade
+        ):
+            self._check_sm_confirmation(snapshot)
+
+    def _check_sm_confirmation(self, snapshot: DataSnapshot) -> None:
+        """L9: Check SM wallet flow and exit if SM disagrees.
+
+        Fires once per configured minute (default: 3, 4). Uses the shared
+        SM monitor's flow state and calls check_sm_confirmation() to decide
+        HOLD/EXIT/IGNORE. On EXIT, closes the position early.
+        """
+        secs_remaining = snapshot.seconds_remaining
+        minutes_elapsed = (300 - secs_remaining) / 60.0
+        current_minute = int(minutes_elapsed)
+
+        if (
+            current_minute not in self._sm_check_minutes
+            or current_minute == self._sm_last_checked_minute
+        ):
+            return
+
+        self._sm_last_checked_minute = current_minute
+        try:
+            sm_flow = self._sm_monitor.get_flow_state()
+            trade = self._executor.pending_trade
+            trade_side = trade.side
+            position_side = (
+                PositionSide.YES if trade_side == "YES" else PositionSide.NO
+            )
+
+            # Market price = current best bid for our side
+            ob = snapshot.orderbook
+            if ob:
+                market_price = (
+                    ob.yes_best_bid if trade_side == "YES"
+                    else ob.no_best_bid
+                )
+            else:
+                market_price = trade.entry_price
+
+            sm_decision = check_sm_confirmation(
+                position_side=position_side,
+                market_price=market_price,
+                flow=sm_flow,
+                config=self._sm_config,
+            )
+
+            self._sm_l9_status = (
+                f"L9@min{current_minute}: {sm_decision.value} "
+                f"(Y${sm_flow.yes_volume:.0f}/N${sm_flow.no_volume:.0f}, "
+                f"{sm_flow.num_wallets}w)"
+            )
+            logger.info(
+                "[%s] L9 SM check at min %d: %s | flow Y=$%.0f N=$%.0f | "
+                "%d wallets | price=$%.4f | position=%s",
+                self.name, current_minute, sm_decision.value,
+                sm_flow.yes_volume, sm_flow.no_volume,
+                sm_flow.num_wallets, market_price, trade_side,
+            )
+
+            # Log for threshold monitoring
+            if self._sm_decision_logger:
+                mkt = snapshot.market
+                self._sm_decision_logger.log_decision(
+                    position_side=position_side,
+                    market_price=market_price,
+                    flow=sm_flow,
+                    decision=sm_decision,
+                    config=self._sm_config,
+                    market_id=mkt.condition_id if mkt else None,
+                    check_minute=current_minute,
+                )
+
+            # Execute early exit if SM disagrees
+            if sm_decision == SMDecision.EXIT:
+                exit_trade = self._executor.close_position_early(
+                    exit_price=market_price,
+                    reason=f"L9_SM_EXIT_min{current_minute}",
+                )
+                if exit_trade:
+                    # Keep _has_position = True to block re-entry
+                    won = exit_trade.pnl is not None and exit_trade.pnl > 0
+                    self._risk_mgr.record_result(exit_trade.pnl or 0)
+                    self._last_trade_msg = (
+                        f"{'W' if won else 'L'} {exit_trade.side} "
+                        f"L9 EXIT @ min{current_minute} "
+                        f"${exit_trade.pnl:+.2f}"
+                    )
+                    logger.warning(
+                        "[%s] L9 SM EXIT executed at min %d: %s P&L=$%.2f",
+                        self.name, current_minute, exit_trade.side,
+                        exit_trade.pnl or 0,
+                    )
+        except Exception as e:
+            logger.error("[%s] L9 SM check failed: %s", self.name, e, exc_info=True)
+
     def _apply_entry_filters(self, decision) -> str:
         """Check data-driven exclusion filters. Returns skip reason or ''.
 
@@ -558,6 +697,8 @@ class ContrarianEvStrategy:
                 "skip_regimes": list(self._skip_regimes),
             },
             "filter_skipped": dict(self._filter_skipped),
+            "l9_status": self._sm_l9_status,
+            "l9_enabled": self._sm_enabled,
         }
 
     def shutdown(self) -> None:

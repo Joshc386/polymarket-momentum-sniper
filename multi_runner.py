@@ -48,6 +48,8 @@ from data.binance_liquidations import BinanceLiquidationFeed
 from notifications.telegram import TelegramNotifier
 from strategies.registry import create_bot
 from tools.latency_logger import LatencyLogger
+from data.sm_wallets import SMWalletRegistry
+from data.sm_trade_monitor import SMTradeMonitor
 
 # ── Logging ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -162,8 +164,35 @@ async def main() -> None:
         paper_prefix=tg_cfg.get("paper_prefix", "[MULTI] "),
     )
 
-    # ── Instantiate bots ──────────────────────────────────────────────
+    # ── Shared SM Trade Monitor (L9) ────────────────────────────────
+    # Create a single shared SM monitor if any bot has SM confirmation
+    # enabled. All bots watch the same market, so one RPC poller suffices.
+    sm_monitor = None
     bots_cfg = cfg.get("bots", {})
+    any_sm_enabled = any(
+        bot_cfg.get("sm_confirmation", {}).get("enabled", False)
+        for bot_cfg in bots_cfg.values()
+        if bot_cfg.get("enabled", True)
+    )
+    if any_sm_enabled:
+        sm_registry = SMWalletRegistry()
+        sm_poll_interval = 3.0
+        # Find the poll interval from the first SM-enabled bot
+        for bot_cfg in bots_cfg.values():
+            sm_cfg = bot_cfg.get("sm_confirmation", {})
+            if sm_cfg.get("enabled", False):
+                sm_poll_interval = sm_cfg.get("poll_interval", 3.0)
+                break
+        sm_monitor = SMTradeMonitor(
+            _sm_registry=sm_registry,
+            _rpcs=[base_config.polygon_rpc_url] if base_config.polygon_rpc_url else [],
+        )
+        logger.info(
+            "Shared SM trade monitor created (poll every %.1fs, %d wallets)",
+            sm_poll_interval, len(sm_registry),
+        )
+
+    # ── Instantiate bots ──────────────────────────────────────────────
     bots = []
     for bot_name, bot_cfg in bots_cfg.items():
         if not bot_cfg.get("enabled", True):
@@ -173,6 +202,9 @@ async def main() -> None:
         if not strategy_name:
             logger.error(f"Bot '{bot_name}' has no strategy defined, skipping")
             continue
+        # Inject shared SM monitor reference for bots that need it
+        if sm_monitor and bot_cfg.get("sm_confirmation", {}).get("enabled", False):
+            bot_cfg["_sm_monitor"] = sm_monitor
         try:
             bot = create_bot(name=bot_name, strategy_name=strategy_name, cfg=bot_cfg)
             bots.append(bot)
@@ -228,6 +260,11 @@ async def main() -> None:
     coinalyze_task = asyncio.create_task(coinalyze.start())
     binance_liq_task = asyncio.create_task(binance_liqs.start())
     ws_feed_task = asyncio.create_task(ws_feed.start())
+    sm_monitor_task = None
+    if sm_monitor:
+        sm_monitor_task = asyncio.create_task(
+            sm_monitor.start(poll_interval=sm_poll_interval)
+        )
 
     logger.info("Waiting for data feeds...")
     for _ in range(50):
@@ -338,6 +375,10 @@ async def main() -> None:
                     last_window_slug = mkt.slug
                     startup_window_slug = mkt.slug
                     startup_skip = False
+                    if sm_monitor and mkt.yes_token_id and mkt.no_token_id:
+                        sm_monitor.set_market(
+                            mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                        )
                     logger.info(
                         f"Startup: observing in-progress window {mkt.slug}, "
                         f"will trade from next window"
@@ -372,6 +413,10 @@ async def main() -> None:
                     # ── New window setup ──────────────────────────────
                     last_window_slug = mkt.slug
                     binance_liqs.reset()
+                    if sm_monitor and mkt.yes_token_id and mkt.no_token_id:
+                        sm_monitor.set_market(
+                            mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                        )
                     # Set exchange avg immediately, poll PolyBackTest in background
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
@@ -562,6 +607,8 @@ async def main() -> None:
         await coinalyze.stop()
         await binance_liqs.stop()
         await ws_feed.stop()
+        if sm_monitor:
+            await sm_monitor.stop()
 
         binance_task.cancel()
         oracle_task.cancel()
@@ -570,10 +617,15 @@ async def main() -> None:
         coinalyze_task.cancel()
         binance_liq_task.cancel()
         ws_feed_task.cancel()
+        if sm_monitor_task:
+            sm_monitor_task.cancel()
 
-        for t in [binance_task, oracle_task, coinbase_task,
-                  coinglass_task, coinalyze_task, binance_liq_task,
-                  ws_feed_task]:
+        _cleanup_tasks = [binance_task, oracle_task, coinbase_task,
+                          coinglass_task, coinalyze_task, binance_liq_task,
+                          ws_feed_task]
+        if sm_monitor_task:
+            _cleanup_tasks.append(sm_monitor_task)
+        for t in _cleanup_tasks:
             try:
                 await t
             except asyncio.CancelledError:
