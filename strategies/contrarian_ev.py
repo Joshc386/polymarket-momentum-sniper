@@ -21,7 +21,11 @@ from signals.orderbook_signal import OrderbookSignal
 from signals.orderbook_fade import OrderbookFadeSignal
 from signals.sentiment_signal import SentimentSignal
 from signals.taker_ratio import TakerRatioSignal
+from signals.absorption import AbsorptionSignal
 from signals.clob_flow import CLOBFlowSignal
+from signals.level_exhaustion import LevelExhaustionSignal
+from signals.trade_size import TradeSizeSignal
+from signals.wallet_flow import WalletFlowSignal
 from signals.combiner import SignalCombiner
 from strategy.entry_logic import EntryLogic, EntryDecision
 from strategy.sizing import PositionSizer
@@ -74,7 +78,22 @@ class ContrarianEvStrategy:
             lookback_candles=mom_cfg.get("lookback_candles", 10),
         )
         self._liquidation = LiquidationSignal()
-        self._orderbook = OrderbookSignal()
+
+        # L4: Orderbook — sub-signal weights and normalization constants
+        ob_cfg = sig_cfg.get("orderbook", {})
+        self._orderbook = OrderbookSignal(
+            imbalance_weight=ob_cfg.get("imbalance_weight", 0.30),
+            flow_weight=ob_cfg.get("flow_weight", 0.25),
+            weighted_mid_weight=ob_cfg.get("weighted_mid_weight", 0.20),
+            top_pressure_weight=ob_cfg.get("top_pressure_weight", 0.15),
+            thickness_weight=ob_cfg.get("thickness_weight", 0.10),
+            imbalance_norm=ob_cfg.get("imbalance_norm", 0.3),
+            flow_norm=ob_cfg.get("flow_norm", 200.0),
+            mid_dev_norm=ob_cfg.get("mid_dev_norm", 0.02),
+            top_pressure_norm=ob_cfg.get("top_pressure_norm", 0.3),
+            thickness_norm=ob_cfg.get("thickness_norm", 0.3),
+        )
+
         self._orderbook_fade = OrderbookFadeSignal(
             imbalance_threshold=sig_cfg.get("fade_threshold", 0.35),
             min_secs_remaining=sig_cfg.get("fade_min_secs", 60.0),
@@ -90,8 +109,66 @@ class ContrarianEvStrategy:
             min_trades=sig_cfg.get("clob_flow_min_trades", 5),
             large_trade_threshold=sig_cfg.get("clob_flow_large_trade", 100.0),
         )
+
+        # L9b: Absorption detection
+        abs_cfg = sig_cfg.get("absorption", {})
+        self._absorption = AbsorptionSignal(
+            min_pressure_volume=abs_cfg.get("min_pressure_volume", 50.0),
+            pressure_imbalance_threshold=abs_cfg.get("pressure_imbalance_threshold", 0.30),
+            resilience_threshold=abs_cfg.get("resilience_threshold", 0.0),
+            smoothing_window=abs_cfg.get("smoothing_window", 10),
+            decay_rate=abs_cfg.get("decay_rate", 0.3),
+            strength_scale=abs_cfg.get("strength_scale", 2.0),
+        )
+
+        # L10: Level exhaustion (gap + wall depletion)
+        exh_cfg = sig_cfg.get("exhaustion", {})
+        self._exhaustion = LevelExhaustionSignal(
+            min_gap_cents=exh_cfg.get("min_gap_cents", 0.02),
+            min_level_size=exh_cfg.get("min_level_size", 5.0),
+            min_wall_size_floor=exh_cfg.get("min_wall_size_floor", 10.0),
+            min_wall_fraction=exh_cfg.get("min_wall_fraction", 0.02),
+            max_depth_levels=exh_cfg.get("max_depth_levels", 10),
+            depletion_threshold=exh_cfg.get("depletion_threshold", 0.40),
+            lookback_ticks=exh_cfg.get("lookback_ticks", 12),
+            decay_rate=exh_cfg.get("decay_rate", 0.5),
+            strength_scale=exh_cfg.get("strength_scale", 2.0),
+            min_seconds_remaining=exh_cfg.get("min_seconds_remaining", 30.0),
+        )
+
+        # L11: Trade size conviction (size distribution asymmetry)
+        ts_cfg = sig_cfg.get("trade_size", {})
+        self._trade_size = TradeSizeSignal(
+            large_multiplier=ts_cfg.get("large_multiplier", 3.0),
+            large_floor=ts_cfg.get("large_floor", 50.0),
+            min_trades=ts_cfg.get("min_trades", 10),
+            large_bias_weight=ts_cfg.get("large_bias_weight", 0.40),
+            count_asym_weight=ts_cfg.get("count_asym_weight", 0.25),
+            size_div_weight=ts_cfg.get("size_div_weight", 0.35),
+            decay_rate=ts_cfg.get("decay_rate", 0.3),
+        )
+
+        # L12: On-chain wallet flow (wallet-level conviction)
+        wf_cfg = sig_cfg.get("wallet_flow", {})
+        self._wallet_flow = WalletFlowSignal(
+            concentration_weight=wf_cfg.get("concentration_weight", 0.40),
+            repeat_weight=wf_cfg.get("repeat_weight", 0.35),
+            wallet_asym_weight=wf_cfg.get("wallet_asym_weight", 0.25),
+            min_trades=wf_cfg.get("min_trades", 5),
+            repeat_trade_min=wf_cfg.get("repeat_trade_min", 2),
+            min_seconds_remaining=wf_cfg.get("min_seconds_remaining", 30.0),
+            decay_rate=wf_cfg.get("decay_rate", 0.3),
+        )
+
         self._combiner = SignalCombiner(
             max_adjustment=sig_cfg.get("max_adjustment", 0.20),
+            fade_weight=sig_cfg.get("fade_weight", 0.10),
+            taker_ratio_weight=sig_cfg.get("taker_ratio_weight", 0.08),
+            clob_flow_weight=sig_cfg.get("clob_flow_weight", 0.12),
+            absorption_weight=sig_cfg.get("absorption_weight", 0.0),
+            exhaustion_weight=sig_cfg.get("exhaustion_weight", 0.0),
+            trade_size_weight=sig_cfg.get("trade_size_weight", 0.0),
+            wallet_flow_weight=sig_cfg.get("wallet_flow_weight", 0.0),
         )
 
         # Strategy components
@@ -155,8 +232,10 @@ class ContrarianEvStrategy:
         filter_cfg = cfg.get("filters", {})
         self._yes_min_price = filter_cfg.get("yes_min_price", 0.0)
         self._skip_regimes = set(filter_cfg.get("skip_regimes", []))
+        self._min_depth_multiplier = filter_cfg.get("min_depth_multiplier", 5.0)
+        self._last_orderbook = None  # stored each tick for filter access
         # Track how often each filter fires (for dashboard/diagnostics)
-        self._filter_skipped = {"yes_low_price": 0, "regime": 0}
+        self._filter_skipped = {"yes_low_price": 0, "regime": 0, "low_liquidity": 0}
 
         # Execution engine (independent bankroll + trade history)
         self._executor = PaperExecutionEngine(
@@ -214,6 +293,10 @@ class ContrarianEvStrategy:
         self._sentiment_val = 0.0
         self._taker_ratio_val = 0.0
         self._clob_flow_val = 0.0
+        self._absorption_val = 0.0
+        self._exhaustion_val = 0.0
+        self._trade_size_val = 0.0
+        self._wallet_flow_val = 0.0
         self._coinbase_dir = 0.0
         self._combined_signal = 0.0
         self._est_prob_up = 0.5
@@ -229,7 +312,12 @@ class ContrarianEvStrategy:
         self._entry_decision = EntryDecision()
         self._orderbook.reset()
         self._orderbook_fade.reset()
+        self._taker_ratio.reset()
         self._clob_flow.reset()
+        self._absorption.reset()
+        self._exhaustion.reset()
+        self._trade_size.reset()
+        self._wallet_flow.reset()
         self._sm_last_checked_minute = -1
         self._sm_l9_status = ""
 
@@ -263,6 +351,7 @@ class ContrarianEvStrategy:
 
         # L4: Orderbook
         ob = snapshot.orderbook
+        self._last_orderbook = ob
         if ob and ob.yes_bid_total_size > 0:
             self._ob_signal_val = self._orderbook.compute(
                 yes_bid_total=ob.yes_bid_total_size,
@@ -310,6 +399,53 @@ class ContrarianEvStrategy:
         # L8: CLOB trade flow (from Polymarket WebSocket)
         self._clob_flow_val = self._clob_flow.compute(snapshot.clob_trade_flow)
 
+        # L9b: Absorption detection (cross-references L8 flow + L4 depth deltas)
+        self._absorption_val = self._absorption.compute(
+            trade_flow=snapshot.clob_trade_flow,
+            ob_yes_bid_delta=snapshot.ob_yes_bid_delta,
+            ob_yes_ask_delta=snapshot.ob_yes_ask_delta,
+            ob_no_bid_delta=snapshot.ob_no_bid_delta,
+            ob_no_ask_delta=snapshot.ob_no_ask_delta,
+        )
+
+        # L10: Level exhaustion (gap + wall depletion from per-level depth)
+        if ob and hasattr(ob, "yes_bid_levels") and ob.yes_bid_levels:
+            window_vol = getattr(snapshot, "window_volume", 0.0)
+            self._exhaustion_val = self._exhaustion.compute(
+                yes_bid_levels=ob.yes_bid_levels,
+                yes_ask_levels=ob.yes_ask_levels,
+                no_bid_levels=ob.no_bid_levels,
+                no_ask_levels=ob.no_ask_levels,
+                seconds_remaining=secs_remaining,
+                window_volume=window_vol,
+            )
+        else:
+            self._exhaustion_val = 0.0
+
+        # L11: Trade size conviction (from individual CLOB trades)
+        if snapshot.clob_trade_flow and hasattr(snapshot.clob_trade_flow, "recent_trades"):
+            self._trade_size_val = self._trade_size.compute(
+                snapshot.clob_trade_flow.recent_trades,
+            )
+        else:
+            self._trade_size_val = 0.0
+
+        # L12: On-chain wallet flow (from wallet flow monitor)
+        wallet_monitor = self._cfg.get("_wallet_flow_monitor")
+        if wallet_monitor:
+            wf_state = wallet_monitor.get_flow_state()
+            self._wallet_flow_val = self._wallet_flow.compute(
+                wallet_volumes=wf_state.wallet_volumes,
+                total_bull_volume=wf_state.total_bull_volume,
+                total_bear_volume=wf_state.total_bear_volume,
+                bull_wallets=wf_state.bull_wallets,
+                bear_wallets=wf_state.bear_wallets,
+                trades=wf_state.trades,
+                seconds_remaining=secs_remaining,
+            )
+        else:
+            self._wallet_flow_val = 0.0
+
         # Regime detection
         self._current_regime = self._regime_detector.detect(snapshot.binance_candles)
         self._regime_params = self._regime_detector.get_params(
@@ -338,6 +474,10 @@ class ContrarianEvStrategy:
             fade_signal=self._fade_signal_val,
             taker_ratio_signal=self._taker_ratio_val,
             clob_flow_signal=self._clob_flow_val,
+            absorption_signal=self._absorption_val,
+            exhaustion_signal=self._exhaustion_val,
+            trade_size_signal=self._trade_size_val,
+            wallet_flow_signal=self._wallet_flow_val,
             schedule_override=_schedule_override,
         )
 
@@ -539,6 +679,9 @@ class ContrarianEvStrategy:
             lose money consistently — likely catching falling knives.
           - skip_regimes: Skip trades in specified regimes. trending_down
             historically had 34% WR, clearly below break-even.
+          - min_depth_multiplier: Skip if ask-side depth < N× our order
+            size. Prevents walking the book on thin markets. At $5 stakes
+            this rarely fires; becomes important when sizing up.
         """
         if (self._yes_min_price > 0
                 and decision.side == "YES"
@@ -551,6 +694,25 @@ class ContrarianEvStrategy:
             if regime_label in self._skip_regimes:
                 self._filter_skipped["regime"] += 1
                 return f"regime={regime_label}"
+
+        # Liquidity check: ensure ask-side depth can absorb our order
+        if self._min_depth_multiplier > 0 and decision.price > 0:
+            ob = self._last_orderbook
+            if ob:
+                # Use max bet size as conservative estimate (actual size
+                # computed later by Kelly, but max is the worst case)
+                intended_shares = self._sizer.max_bet_usdc / decision.price
+                ask_depth = (
+                    ob.yes_ask_depth if decision.side == "YES"
+                    else ob.no_ask_depth
+                )
+                if ask_depth > 0 and ask_depth < intended_shares * self._min_depth_multiplier:
+                    self._filter_skipped["low_liquidity"] += 1
+                    return (
+                        f"Low liquidity: {decision.side} ask depth "
+                        f"{ask_depth:.0f} < {self._min_depth_multiplier}x "
+                        f"order {intended_shares:.0f} shares"
+                    )
 
         return ""
 
@@ -673,6 +835,10 @@ class ContrarianEvStrategy:
                 "L6 Fade": self._fade_signal_val,
                 "L7 Taker": self._taker_ratio_val,
                 "L8 Flow": self._clob_flow_val,
+                "Absorb": self._absorption_val,
+                "L10 Exh": self._exhaustion_val,
+                "L11 Size": self._trade_size_val,
+                "L12 Wallet": self._wallet_flow_val,
             },
             "combined_signal": self._combined_signal,
             "prob_up": self._est_prob_up,

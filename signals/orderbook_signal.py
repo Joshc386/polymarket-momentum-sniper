@@ -21,12 +21,21 @@ from dataclasses import dataclass, field
 class OrderbookSignal:
     """Layer 4: Polymarket CLOB orderbook analysis."""
 
-    # Sub-signal weights
+    # Sub-signal weights (sum to 1.0)
     imbalance_weight: float = 0.30
     flow_weight: float = 0.25
     weighted_mid_weight: float = 0.20
     top_pressure_weight: float = 0.15
     thickness_weight: float = 0.10
+
+    # Normalization constants — control sensitivity of each sub-signal.
+    # Each raw value is divided by its constant then clamped to [-1, 1].
+    # Smaller = more sensitive (saturates sooner), larger = less sensitive.
+    imbalance_norm: float = 0.3       # bid/ask imbalance ratio divisor
+    flow_norm: float = 200.0          # order flow (depth delta) divisor
+    mid_dev_norm: float = 0.02        # weighted mid deviation divisor
+    top_pressure_norm: float = 0.3    # top-of-book pressure ratio divisor
+    thickness_norm: float = 0.3       # book thickness ratio divisor
 
     # History for flow analysis
     _imbalance_history: deque = field(default_factory=lambda: deque(maxlen=30))
@@ -149,8 +158,7 @@ class OrderbookSignal:
             return 0.0
 
         imbalance = (bullish_vol - bearish_vol) / total
-        # Scale: typical imbalance of ±0.3 maps to ±1.0
-        return max(-1.0, min(1.0, imbalance / 0.3))
+        return max(-1.0, min(1.0, imbalance / self.imbalance_norm))
 
     def _order_flow(
         self,
@@ -170,9 +178,7 @@ class OrderbookSignal:
         # Also: NO ask increasing (more people willing to sell NO = bullish on UP)
         bullish_flow = yes_bid_delta - yes_ask_delta + no_ask_delta - no_bid_delta
 
-        # Normalize by a reasonable typical delta
-        # Typical depth changes might be in the range of 50-500 shares
-        normalized = bullish_flow / 200.0  # 200 share delta = full signal
+        normalized = bullish_flow / self.flow_norm
 
         return max(-1.0, min(1.0, normalized))
 
@@ -190,8 +196,7 @@ class OrderbookSignal:
             return 0.0
 
         deviation = weighted_mid - simple_mid
-        # Typical deviation is 0-0.03 cents. Scale so 0.02 = full signal
-        return max(-1.0, min(1.0, deviation / 0.02))
+        return max(-1.0, min(1.0, deviation / self.mid_dev_norm))
 
     def _top_of_book_pressure(
         self,
@@ -208,7 +213,7 @@ class OrderbookSignal:
             return 0.0
 
         ratio = (bid_depth_top5 - ask_depth_top5) / total
-        return max(-1.0, min(1.0, ratio / 0.3))
+        return max(-1.0, min(1.0, ratio / self.top_pressure_norm))
 
     def _book_thickness(
         self,
@@ -237,9 +242,9 @@ class OrderbookSignal:
         if total_levels > 0:
             level_imbalance = (num_bid_levels - num_ask_levels) / total_levels
             # Blend volume and level count imbalance
-            return max(-1.0, min(1.0, (thickness_imbalance * 0.7 + level_imbalance * 0.3) / 0.3))
+            return max(-1.0, min(1.0, (thickness_imbalance * 0.7 + level_imbalance * 0.3) / self.thickness_norm))
 
-        return max(-1.0, min(1.0, thickness_imbalance / 0.3))
+        return max(-1.0, min(1.0, thickness_imbalance / self.thickness_norm))
 
     def reset(self):
         """Reset history (call on window transitions)."""

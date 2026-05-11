@@ -65,6 +65,12 @@ class CLOBTradeFlow:
     last_trade_size: float = 0.0
     last_trade_time: float = 0.0
 
+    # Individual trades for size analysis (L11).
+    # Each tuple: (timestamp, token, side, price, size).
+    # Populated from the rolling window — same trades used to compute
+    # the aggregate fields above.
+    recent_trades: list = field(default_factory=list)
+
 
 class _TradeFlowTracker:
     """Accumulates CLOB trade events in a rolling window."""
@@ -142,6 +148,9 @@ class _TradeFlowTracker:
             flow.last_trade_price = price
             flow.last_trade_size = size
             flow.last_trade_time = ts
+
+        # Expose individual trades for L11 trade size analysis
+        flow.recent_trades = list(self._trades)
 
         return flow
 

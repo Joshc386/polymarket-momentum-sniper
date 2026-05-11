@@ -7,9 +7,10 @@
 - L4 Orderbook: Polymarket CLOB depth, imbalance, and order flow
 - L5 Sentiment: Coinalyze cross-exchange OI, L/S ratios, funding rates
 
-Additive modifiers (applied after core blend):
-- L6 Orderbook Fade: Contrarian signal on extreme CLOB imbalances
-- L7 Taker Ratio: Binance taker buy/sell volume pressure
+Additive modifiers (applied after core blend, weights configurable):
+- L6 Orderbook Fade: Contrarian signal on extreme CLOB imbalances (default 10%)
+- L7 Taker Ratio: Binance taker buy/sell volume pressure (default 8%)
+- L8 CLOB Trade Flow: Polymarket executed trade direction (default 12%)
 
 Coinbase cross-exchange confirmation as confidence modifier.
 """
@@ -73,6 +74,16 @@ class SignalCombiner:
     disagreement_dampen: float = 0.70
     weight_schedule_name: str = "default"
 
+    # Additive modifier weights for L6/L7/L8/L9b
+    # These are applied after the core L1-L5 blend.
+    fade_weight: float = 0.10       # L6: orderbook fade (contrarian on extreme imbalance)
+    taker_ratio_weight: float = 0.08  # L7: Binance taker buy/sell ratio
+    clob_flow_weight: float = 0.12  # L8: Polymarket executed trade flow
+    absorption_weight: float = 0.0  # L9b: absorption detection (disabled by default)
+    exhaustion_weight: float = 0.0  # L10: level exhaustion (disabled by default)
+    trade_size_weight: float = 0.0  # L11: trade size conviction (disabled by default)
+    wallet_flow_weight: float = 0.0  # L12: on-chain wallet flow (disabled by default)
+
     def __post_init__(self) -> None:
         self._schedule = WEIGHT_SCHEDULES.get(
             self.weight_schedule_name, WEIGHT_SCHEDULE_DEFAULT
@@ -114,6 +125,10 @@ class SignalCombiner:
         fade_signal: float = 0.0,
         taker_ratio_signal: float = 0.0,
         clob_flow_signal: float = 0.0,
+        absorption_signal: float = 0.0,
+        exhaustion_signal: float = 0.0,
+        trade_size_signal: float = 0.0,
+        wallet_flow_signal: float = 0.0,
         schedule_override: str = "",
     ) -> tuple[float, float]:
         """Combine signals into estimated probability of UP.
@@ -138,6 +153,18 @@ class SignalCombiner:
             clob_flow_signal: Layer 8 CLOB trade flow [-1, 1] (0 if unavailable).
                 Real Polymarket trade volume direction. Applied as additive
                 modifier after core blend.
+            absorption_signal: Layer 9b absorption [-1, 1] (0 if unavailable).
+                Hidden liquidity detection from depth resilience vs trade
+                flow pressure. Applied as additive modifier after core blend.
+            exhaustion_signal: Layer 10 level exhaustion [-1, 1] (0 if
+                unavailable). Gap + wall depletion detection. Applied as
+                additive modifier after core blend.
+            trade_size_signal: Layer 11 trade size conviction [-1, 1] (0
+                if unavailable). Conviction asymmetry from trade size
+                distribution. Applied as additive modifier after core blend.
+            wallet_flow_signal: Layer 12 on-chain wallet flow [-1, 1] (0
+                if unavailable). Wallet-level conviction from Polygon
+                blockchain data. Applied as additive modifier after core.
             schedule_override: Named weight schedule to use instead of
                 default. Pass 'ranging' for orderflow-dominant weighting.
 
@@ -206,21 +233,33 @@ class SignalCombiner:
             + w5 * sentiment_signal
         )
 
-        # L6: Orderbook fade — additive modifier (10% weight when active)
-        # Only fires on extreme imbalances, so it's sparse but high-conviction
-        if fade_signal != 0.0:
-            raw_signal += 0.10 * fade_signal
+        # L6: Orderbook fade — additive modifier (sparse but high-conviction)
+        if fade_signal != 0.0 and self.fade_weight > 0:
+            raw_signal += self.fade_weight * fade_signal
 
-        # L7: Taker ratio — additive modifier (8% weight when active)
-        # Continuous signal from Binance trade flow
-        if taker_ratio_signal != 0.0:
-            raw_signal += 0.08 * taker_ratio_signal
+        # L7: Taker ratio — additive modifier (Binance trade flow)
+        if taker_ratio_signal != 0.0 and self.taker_ratio_weight > 0:
+            raw_signal += self.taker_ratio_weight * taker_ratio_signal
 
-        # L8: CLOB trade flow — additive modifier (12% weight when active)
-        # Real Polymarket trade volume. Higher weight than L7 because this
-        # is actual trading on the market we're betting on, not a proxy.
-        if clob_flow_signal != 0.0:
-            raw_signal += 0.12 * clob_flow_signal
+        # L8: CLOB trade flow — additive modifier (Polymarket executed trades)
+        if clob_flow_signal != 0.0 and self.clob_flow_weight > 0:
+            raw_signal += self.clob_flow_weight * clob_flow_signal
+
+        # L9b: Absorption — hidden liquidity detection
+        if absorption_signal != 0.0 and self.absorption_weight > 0:
+            raw_signal += self.absorption_weight * absorption_signal
+
+        # L10: Level exhaustion — gap + wall depletion
+        if exhaustion_signal != 0.0 and self.exhaustion_weight > 0:
+            raw_signal += self.exhaustion_weight * exhaustion_signal
+
+        # L11: Trade size conviction — size distribution asymmetry
+        if trade_size_signal != 0.0 and self.trade_size_weight > 0:
+            raw_signal += self.trade_size_weight * trade_size_signal
+
+        # L12: On-chain wallet flow — wallet-level conviction
+        if wallet_flow_signal != 0.0 and self.wallet_flow_weight > 0:
+            raw_signal += self.wallet_flow_weight * wallet_flow_signal
 
         # Cross-exchange confirmation from Coinbase
         if coinbase_direction != 0.0 and raw_signal != 0.0:
