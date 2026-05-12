@@ -48,11 +48,25 @@ WEIGHT_SCHEDULE_RANGING = [
     (30,  0.05, 0.30, 0.05, 0.55, 0.05),  # Final: slight momentum boost for late moves
 ]
 
+# Bot K optimised schedule — walk-forward validated (7/7 folds beat default).
+# Backtest on 13,867 markets (Mar 24 – May 11, 2026): +180 PnL improvement OOS.
+# Key finding: momentum (L2) is the dominant signal, oracle (L1) is over-weighted
+# in defaults. Orderbook (L4) and taker (L7, additive) also boosted.
+# L3/L5 kept at default absolute values; L1/L2/L4 scaled into remaining 73%.
+# Trade-weighted averages from optimiser: L1=0.145, L2=0.524, L4=0.331 (normalised).
+WEIGHT_SCHEDULE_BOT_K = [
+    (300, 0.15, 0.35, 0.15, 0.20, 0.15),  # Early: momentum leads even early
+    (180, 0.11, 0.38, 0.12, 0.24, 0.15),  # Mid: optimiser sweet spot (~0.145/0.524/0.331)
+    (90,  0.08, 0.40, 0.08, 0.29, 0.15),  # Late: momentum + orderbook strengthen
+    (30,  0.05, 0.42, 0.05, 0.33, 0.15),  # Final: momentum + orderbook dominate
+]
+
 # Named schedules for config lookup
 WEIGHT_SCHEDULES = {
     "default": WEIGHT_SCHEDULE_DEFAULT,
     "kf_dominant": WEIGHT_SCHEDULE_KF_DOMINANT,
     "ranging": WEIGHT_SCHEDULE_RANGING,
+    "bot_k_optimised": WEIGHT_SCHEDULE_BOT_K,
 }
 
 

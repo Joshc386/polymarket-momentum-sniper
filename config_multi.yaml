@@ -465,7 +465,14 @@ bots:
       high_volatility_size_factor: 0.5
 
   # -- Bot K: Signal-Aligned + Enhanced Risk Management --
-  # Fork of Bot G with improved risk management (validated via backtest):
+  # Fork of Bot G with walk-forward optimised signal weights + enhanced risk:
+  # Signal changes (backtest: +180 PnL improvement OOS, 7/7 folds beat default):
+  # - Core weight schedule "bot_k_optimised": momentum-dominant (L2 ~0.38-0.42)
+  # - Oracle (L1) reduced from 0.20 → 0.11 at 180s (was over-weighted)
+  # - Orderbook (L4) boosted from 0.23 → 0.24 at 180s
+  # - Taker ratio (L7) boosted from 0.08 → 0.131
+  # - L9b-L12 enabled at conservative 0.05 (absorption, exhaustion, trade_size, wallet_flow)
+  # Risk management (validated via backtest):
   # - No streak size reduction (backtest showed it punishes normal variance)
   # - BTC distance stop at $100 (91% helped rate, +$74 over 2,263 trades)
   # - Drawdown breaker at 30% from peak
@@ -488,7 +495,7 @@ bots:
       yes_min_price: 0.40
       skip_regimes: [trending_down]
 
-    # Same regime, signals, entry, sizing as Bot G
+    # Same regime as Bot G
     regime:
       detector: mtf
       trend_threshold: 0.30
@@ -499,7 +506,12 @@ bots:
       allowed_regimes: [trending_up, trending_down, ranging]
       block_regimes: [high_vol, low_vol]
 
+    # Signals — walk-forward optimised core weights (7/7 folds beat default)
+    # Backtest: 13,867 markets, +180.24 PnL improvement OOS vs Bot G defaults.
+    # Key finding: momentum (L2) is dominant signal, oracle (L1) was over-weighted.
+    # L9b-L12 at conservative 0.05 (no backtest data available for these).
     signals:
+      weight_schedule: bot_k_optimised  # momentum-dominant schedule
       oracle_lag:
         max_expected_lag: 0.001
       momentum:
@@ -510,7 +522,13 @@ bots:
         rsi_weight: 0.10
         rsi_period: 5
         lookback_candles: 10
-      max_adjustment: 0.20
+      max_adjustment: 0.195            # optimised (was 0.20)
+      taker_ratio_weight: 0.131        # L7 optimised (was 0.08)
+      # L9b-L12: conservative defaults (no backtest data, start small)
+      absorption_weight: 0.05          # L9b: orderbook absorption detection
+      exhaustion_weight: 0.05          # L10: level exhaustion patterns
+      trade_size_weight: 0.05          # L11: trade size conviction
+      wallet_flow_weight: 0.05         # L12: on-chain wallet flow
 
     entry:
       min_edge: 0.003

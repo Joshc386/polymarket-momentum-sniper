@@ -170,6 +170,7 @@ class ContrarianEvStrategy:
 
         self._combiner = SignalCombiner(
             max_adjustment=sig_cfg.get("max_adjustment", 0.20),
+            weight_schedule_name=sig_cfg.get("weight_schedule", "default"),
             fade_weight=sig_cfg.get("fade_weight", 0.10),
             taker_ratio_weight=sig_cfg.get("taker_ratio_weight", 0.08),
             clob_flow_weight=sig_cfg.get("clob_flow_weight", 0.12),
