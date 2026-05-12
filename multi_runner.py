@@ -50,6 +50,7 @@ from strategies.registry import create_bot
 from tools.latency_logger import LatencyLogger
 from data.sm_wallets import SMWalletRegistry
 from data.sm_trade_monitor import SMTradeMonitor
+from data.wallet_flow_monitor import WalletFlowMonitor
 
 # ── Logging ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -192,6 +193,19 @@ async def main() -> None:
             sm_poll_interval, sm_registry.wallet_count,
         )
 
+    # ── Shared Wallet Flow Monitor (L12) ────────────────────────────
+    # Create a single shared wallet flow monitor if any bot has
+    # wallet_flow_weight > 0. Polls Polygon RPC for all on-chain trades.
+    wallet_flow_monitor = None
+    any_wf_enabled = any(
+        bot_cfg.get("signals", {}).get("wallet_flow_weight", 0.0) > 0
+        for bot_cfg in bots_cfg.values()
+        if bot_cfg.get("enabled", True)
+    )
+    if any_wf_enabled:
+        wallet_flow_monitor = WalletFlowMonitor()
+        logger.info("Shared wallet flow monitor created for L12 signal")
+
     # ── Instantiate bots ──────────────────────────────────────────────
     bots = []
     for bot_name, bot_cfg in bots_cfg.items():
@@ -205,6 +219,9 @@ async def main() -> None:
         # Inject shared SM monitor reference for bots that need it
         if sm_monitor and bot_cfg.get("sm_confirmation", {}).get("enabled", False):
             bot_cfg["_sm_monitor"] = sm_monitor
+        # Inject shared wallet flow monitor for bots with L12 enabled
+        if wallet_flow_monitor and bot_cfg.get("signals", {}).get("wallet_flow_weight", 0.0) > 0:
+            bot_cfg["_wallet_flow_monitor"] = wallet_flow_monitor
         try:
             bot = create_bot(name=bot_name, strategy_name=strategy_name, cfg=bot_cfg)
             bots.append(bot)
@@ -264,6 +281,11 @@ async def main() -> None:
     if sm_monitor:
         sm_monitor_task = asyncio.create_task(
             sm_monitor.start(poll_interval=sm_poll_interval)
+        )
+    wf_monitor_task = None
+    if wallet_flow_monitor:
+        wf_monitor_task = asyncio.create_task(
+            wallet_flow_monitor.start(poll_interval=3.0)
         )
 
     logger.info("Waiting for data feeds...")
@@ -375,10 +397,15 @@ async def main() -> None:
                     last_window_slug = mkt.slug
                     startup_window_slug = mkt.slug
                     startup_skip = False
-                    if sm_monitor and mkt.yes_token_id and mkt.no_token_id:
-                        sm_monitor.set_market(
-                            mkt.yes_token_id, mkt.no_token_id, mkt.slug,
-                        )
+                    if mkt.yes_token_id and mkt.no_token_id:
+                        if sm_monitor:
+                            sm_monitor.set_market(
+                                mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                            )
+                        if wallet_flow_monitor:
+                            wallet_flow_monitor.set_market(
+                                mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                            )
                     logger.info(
                         f"Startup: observing in-progress window {mkt.slug}, "
                         f"will trade from next window"
@@ -413,10 +440,15 @@ async def main() -> None:
                     # ── New window setup ──────────────────────────────
                     last_window_slug = mkt.slug
                     binance_liqs.reset()
-                    if sm_monitor and mkt.yes_token_id and mkt.no_token_id:
-                        sm_monitor.set_market(
-                            mkt.yes_token_id, mkt.no_token_id, mkt.slug,
-                        )
+                    if mkt.yes_token_id and mkt.no_token_id:
+                        if sm_monitor:
+                            sm_monitor.set_market(
+                                mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                            )
+                        if wallet_flow_monitor:
+                            wallet_flow_monitor.set_market(
+                                mkt.yes_token_id, mkt.no_token_id, mkt.slug,
+                            )
                     # Set exchange avg immediately, poll PolyBackTest in background
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
@@ -609,6 +641,8 @@ async def main() -> None:
         await ws_feed.stop()
         if sm_monitor:
             await sm_monitor.stop()
+        if wallet_flow_monitor:
+            await wallet_flow_monitor.stop()
 
         binance_task.cancel()
         oracle_task.cancel()
@@ -619,12 +653,16 @@ async def main() -> None:
         ws_feed_task.cancel()
         if sm_monitor_task:
             sm_monitor_task.cancel()
+        if wf_monitor_task:
+            wf_monitor_task.cancel()
 
         _cleanup_tasks = [binance_task, oracle_task, coinbase_task,
                           coinglass_task, coinalyze_task, binance_liq_task,
                           ws_feed_task]
         if sm_monitor_task:
             _cleanup_tasks.append(sm_monitor_task)
+        if wf_monitor_task:
+            _cleanup_tasks.append(wf_monitor_task)
         for t in _cleanup_tasks:
             try:
                 await t

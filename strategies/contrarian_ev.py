@@ -434,7 +434,12 @@ class ContrarianEvStrategy:
         # L10: Level exhaustion (only when enabled via weight > 0)
         if self._exhaustion:
             if ob and hasattr(ob, "yes_bid_levels") and ob.yes_bid_levels:
-                window_vol = getattr(snapshot, "window_volume", 0.0)
+                # Window volume from CLOB trade flow for dynamic wall sizing
+                window_vol = (
+                    snapshot.clob_trade_flow.total_volume
+                    if snapshot.clob_trade_flow
+                    else 0.0
+                )
                 self._exhaustion_val = self._exhaustion.compute(
                     yes_bid_levels=ob.yes_bid_levels,
                     yes_ask_levels=ob.yes_ask_levels,
