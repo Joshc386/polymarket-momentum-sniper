@@ -110,55 +110,63 @@ class ContrarianEvStrategy:
             large_trade_threshold=sig_cfg.get("clob_flow_large_trade", 100.0),
         )
 
-        # L9b: Absorption detection
-        abs_cfg = sig_cfg.get("absorption", {})
-        self._absorption = AbsorptionSignal(
-            min_pressure_volume=abs_cfg.get("min_pressure_volume", 50.0),
-            pressure_imbalance_threshold=abs_cfg.get("pressure_imbalance_threshold", 0.30),
-            resilience_threshold=abs_cfg.get("resilience_threshold", 0.0),
-            smoothing_window=abs_cfg.get("smoothing_window", 10),
-            decay_rate=abs_cfg.get("decay_rate", 0.3),
-            strength_scale=abs_cfg.get("strength_scale", 2.0),
-        )
+        # L9b-L12: Optional signal layers — only instantiated when config
+        # sets a non-zero weight. Bot G runs without these; Bot K enables
+        # them via config. This keeps Bot G's hot path unchanged.
+        self._absorption = None
+        self._exhaustion = None
+        self._trade_size = None
+        self._wallet_flow = None
 
-        # L10: Level exhaustion (gap + wall depletion)
-        exh_cfg = sig_cfg.get("exhaustion", {})
-        self._exhaustion = LevelExhaustionSignal(
-            min_gap_cents=exh_cfg.get("min_gap_cents", 0.02),
-            min_level_size=exh_cfg.get("min_level_size", 5.0),
-            min_wall_size_floor=exh_cfg.get("min_wall_size_floor", 10.0),
-            min_wall_fraction=exh_cfg.get("min_wall_fraction", 0.02),
-            max_depth_levels=exh_cfg.get("max_depth_levels", 10),
-            depletion_threshold=exh_cfg.get("depletion_threshold", 0.40),
-            lookback_ticks=exh_cfg.get("lookback_ticks", 12),
-            decay_rate=exh_cfg.get("decay_rate", 0.5),
-            strength_scale=exh_cfg.get("strength_scale", 2.0),
-            min_seconds_remaining=exh_cfg.get("min_seconds_remaining", 30.0),
-        )
+        if sig_cfg.get("absorption_weight", 0.0) > 0:
+            abs_cfg = sig_cfg.get("absorption", {})
+            self._absorption = AbsorptionSignal(
+                min_pressure_volume=abs_cfg.get("min_pressure_volume", 50.0),
+                pressure_imbalance_threshold=abs_cfg.get("pressure_imbalance_threshold", 0.30),
+                resilience_threshold=abs_cfg.get("resilience_threshold", 0.0),
+                smoothing_window=abs_cfg.get("smoothing_window", 10),
+                decay_rate=abs_cfg.get("decay_rate", 0.3),
+                strength_scale=abs_cfg.get("strength_scale", 2.0),
+            )
 
-        # L11: Trade size conviction (size distribution asymmetry)
-        ts_cfg = sig_cfg.get("trade_size", {})
-        self._trade_size = TradeSizeSignal(
-            large_multiplier=ts_cfg.get("large_multiplier", 3.0),
-            large_floor=ts_cfg.get("large_floor", 50.0),
-            min_trades=ts_cfg.get("min_trades", 10),
-            large_bias_weight=ts_cfg.get("large_bias_weight", 0.40),
-            count_asym_weight=ts_cfg.get("count_asym_weight", 0.25),
-            size_div_weight=ts_cfg.get("size_div_weight", 0.35),
-            decay_rate=ts_cfg.get("decay_rate", 0.3),
-        )
+        if sig_cfg.get("exhaustion_weight", 0.0) > 0:
+            exh_cfg = sig_cfg.get("exhaustion", {})
+            self._exhaustion = LevelExhaustionSignal(
+                min_gap_cents=exh_cfg.get("min_gap_cents", 0.02),
+                min_level_size=exh_cfg.get("min_level_size", 5.0),
+                min_wall_size_floor=exh_cfg.get("min_wall_size_floor", 10.0),
+                min_wall_fraction=exh_cfg.get("min_wall_fraction", 0.02),
+                max_depth_levels=exh_cfg.get("max_depth_levels", 10),
+                depletion_threshold=exh_cfg.get("depletion_threshold", 0.40),
+                lookback_ticks=exh_cfg.get("lookback_ticks", 12),
+                decay_rate=exh_cfg.get("decay_rate", 0.5),
+                strength_scale=exh_cfg.get("strength_scale", 2.0),
+                min_seconds_remaining=exh_cfg.get("min_seconds_remaining", 30.0),
+            )
 
-        # L12: On-chain wallet flow (wallet-level conviction)
-        wf_cfg = sig_cfg.get("wallet_flow", {})
-        self._wallet_flow = WalletFlowSignal(
-            concentration_weight=wf_cfg.get("concentration_weight", 0.40),
-            repeat_weight=wf_cfg.get("repeat_weight", 0.35),
-            wallet_asym_weight=wf_cfg.get("wallet_asym_weight", 0.25),
-            min_trades=wf_cfg.get("min_trades", 5),
-            repeat_trade_min=wf_cfg.get("repeat_trade_min", 2),
-            min_seconds_remaining=wf_cfg.get("min_seconds_remaining", 30.0),
-            decay_rate=wf_cfg.get("decay_rate", 0.3),
-        )
+        if sig_cfg.get("trade_size_weight", 0.0) > 0:
+            ts_cfg = sig_cfg.get("trade_size", {})
+            self._trade_size = TradeSizeSignal(
+                large_multiplier=ts_cfg.get("large_multiplier", 3.0),
+                large_floor=ts_cfg.get("large_floor", 50.0),
+                min_trades=ts_cfg.get("min_trades", 10),
+                large_bias_weight=ts_cfg.get("large_bias_weight", 0.40),
+                count_asym_weight=ts_cfg.get("count_asym_weight", 0.25),
+                size_div_weight=ts_cfg.get("size_div_weight", 0.35),
+                decay_rate=ts_cfg.get("decay_rate", 0.3),
+            )
+
+        if sig_cfg.get("wallet_flow_weight", 0.0) > 0:
+            wf_cfg = sig_cfg.get("wallet_flow", {})
+            self._wallet_flow = WalletFlowSignal(
+                concentration_weight=wf_cfg.get("concentration_weight", 0.40),
+                repeat_weight=wf_cfg.get("repeat_weight", 0.35),
+                wallet_asym_weight=wf_cfg.get("wallet_asym_weight", 0.25),
+                min_trades=wf_cfg.get("min_trades", 5),
+                repeat_trade_min=wf_cfg.get("repeat_trade_min", 2),
+                min_seconds_remaining=wf_cfg.get("min_seconds_remaining", 30.0),
+                decay_rate=wf_cfg.get("decay_rate", 0.3),
+            )
 
         self._combiner = SignalCombiner(
             max_adjustment=sig_cfg.get("max_adjustment", 0.20),
@@ -205,6 +213,15 @@ class ContrarianEvStrategy:
             low_volatility_threshold=risk_cfg.get("low_volatility_threshold", 0.0001),
             high_volatility_threshold=risk_cfg.get("high_volatility_threshold", 0.02),
             high_volatility_size_factor=risk_cfg.get("high_volatility_size_factor", 0.5),
+            # New features — backward compatible (disabled by default)
+            streak_reduction_enabled=risk_cfg.get("streak_reduction_enabled", True),
+            drawdown_pct=risk_cfg.get("drawdown_pct", 0.0),
+            daily_trade_cap=risk_cfg.get("daily_trade_cap", 0),
+            btc_distance_stop=risk_cfg.get("btc_distance_stop", 0.0),
+            btc_distance_min_secs_remaining=risk_cfg.get(
+                "btc_distance_min_secs_remaining", 60.0
+            ),
+            regime_size_overrides=risk_cfg.get("regime_size_overrides", {}),
         )
 
         # Regime detector — use MTF if configured, else fall back to base
@@ -314,10 +331,14 @@ class ContrarianEvStrategy:
         self._orderbook_fade.reset()
         self._taker_ratio.reset()
         self._clob_flow.reset()
-        self._absorption.reset()
-        self._exhaustion.reset()
-        self._trade_size.reset()
-        self._wallet_flow.reset()
+        if self._absorption:
+            self._absorption.reset()
+        if self._exhaustion:
+            self._exhaustion.reset()
+        if self._trade_size:
+            self._trade_size.reset()
+        if self._wallet_flow:
+            self._wallet_flow.reset()
         self._sm_last_checked_minute = -1
         self._sm_l9_status = ""
 
@@ -399,52 +420,56 @@ class ContrarianEvStrategy:
         # L8: CLOB trade flow (from Polymarket WebSocket)
         self._clob_flow_val = self._clob_flow.compute(snapshot.clob_trade_flow)
 
-        # L9b: Absorption detection (cross-references L8 flow + L4 depth deltas)
-        self._absorption_val = self._absorption.compute(
-            trade_flow=snapshot.clob_trade_flow,
-            ob_yes_bid_delta=snapshot.ob_yes_bid_delta,
-            ob_yes_ask_delta=snapshot.ob_yes_ask_delta,
-            ob_no_bid_delta=snapshot.ob_no_bid_delta,
-            ob_no_ask_delta=snapshot.ob_no_ask_delta,
-        )
-
-        # L10: Level exhaustion (gap + wall depletion from per-level depth)
-        if ob and hasattr(ob, "yes_bid_levels") and ob.yes_bid_levels:
-            window_vol = getattr(snapshot, "window_volume", 0.0)
-            self._exhaustion_val = self._exhaustion.compute(
-                yes_bid_levels=ob.yes_bid_levels,
-                yes_ask_levels=ob.yes_ask_levels,
-                no_bid_levels=ob.no_bid_levels,
-                no_ask_levels=ob.no_ask_levels,
-                seconds_remaining=secs_remaining,
-                window_volume=window_vol,
+        # L9b: Absorption detection (only when enabled via weight > 0)
+        if self._absorption:
+            self._absorption_val = self._absorption.compute(
+                trade_flow=snapshot.clob_trade_flow,
+                ob_yes_bid_delta=snapshot.ob_yes_bid_delta,
+                ob_yes_ask_delta=snapshot.ob_yes_ask_delta,
+                ob_no_bid_delta=snapshot.ob_no_bid_delta,
+                ob_no_ask_delta=snapshot.ob_no_ask_delta,
             )
-        else:
-            self._exhaustion_val = 0.0
 
-        # L11: Trade size conviction (from individual CLOB trades)
-        if snapshot.clob_trade_flow and hasattr(snapshot.clob_trade_flow, "recent_trades"):
-            self._trade_size_val = self._trade_size.compute(
-                snapshot.clob_trade_flow.recent_trades,
-            )
-        else:
-            self._trade_size_val = 0.0
+        # L10: Level exhaustion (only when enabled via weight > 0)
+        if self._exhaustion:
+            if ob and hasattr(ob, "yes_bid_levels") and ob.yes_bid_levels:
+                window_vol = getattr(snapshot, "window_volume", 0.0)
+                self._exhaustion_val = self._exhaustion.compute(
+                    yes_bid_levels=ob.yes_bid_levels,
+                    yes_ask_levels=ob.yes_ask_levels,
+                    no_bid_levels=ob.no_bid_levels,
+                    no_ask_levels=ob.no_ask_levels,
+                    seconds_remaining=secs_remaining,
+                    window_volume=window_vol,
+                )
+            else:
+                self._exhaustion_val = 0.0
 
-        # L12: On-chain wallet flow (from wallet flow monitor)
-        wallet_monitor = self._cfg.get("_wallet_flow_monitor")
-        if wallet_monitor:
-            wf_state = wallet_monitor.get_flow_state()
-            self._wallet_flow_val = self._wallet_flow.compute(
-                wallet_volumes=wf_state.wallet_volumes,
-                total_bull_volume=wf_state.total_bull_volume,
-                total_bear_volume=wf_state.total_bear_volume,
-                bull_wallets=wf_state.bull_wallets,
-                bear_wallets=wf_state.bear_wallets,
-                trades=wf_state.trades,
-                seconds_remaining=secs_remaining,
-            )
-        else:
-            self._wallet_flow_val = 0.0
+        # L11: Trade size conviction (only when enabled via weight > 0)
+        if self._trade_size:
+            if snapshot.clob_trade_flow and hasattr(snapshot.clob_trade_flow, "recent_trades"):
+                self._trade_size_val = self._trade_size.compute(
+                    snapshot.clob_trade_flow.recent_trades,
+                )
+            else:
+                self._trade_size_val = 0.0
+
+        # L12: On-chain wallet flow (only when enabled via weight > 0)
+        if self._wallet_flow:
+            wallet_monitor = self._cfg.get("_wallet_flow_monitor")
+            if wallet_monitor:
+                wf_state = wallet_monitor.get_flow_state()
+                self._wallet_flow_val = self._wallet_flow.compute(
+                    wallet_volumes=wf_state.wallet_volumes,
+                    total_bull_volume=wf_state.total_bull_volume,
+                    total_bear_volume=wf_state.total_bear_volume,
+                    bull_wallets=wf_state.bull_wallets,
+                    bear_wallets=wf_state.bear_wallets,
+                    trades=wf_state.trades,
+                    seconds_remaining=secs_remaining,
+                )
+            else:
+                self._wallet_flow_val = 0.0
 
         # Regime detection
         self._current_regime = self._regime_detector.detect(snapshot.binance_candles)
@@ -485,8 +510,12 @@ class ContrarianEvStrategy:
         recent_vol = self._risk_mgr.compute_recent_volatility(
             snapshot.binance_candles
         )
+        regime_label = (
+            self._current_regime.regime.value
+            if self._current_regime else ""
+        )
         self._risk_state = self._risk_mgr.evaluate(
-            self._executor.bankroll, recent_vol
+            self._executor.bankroll, recent_vol, current_regime=regime_label
         )
 
         if not snapshot.feeds_healthy and self._risk_state.can_trade:
@@ -561,6 +590,14 @@ class ContrarianEvStrategy:
         elif not ob:
             self._entry_decision = EntryDecision(reason="No orderbook data")
 
+        # ── BTC distance stop ──
+        if (
+            self._has_position
+            and self._executor.pending_trade
+            and self._risk_mgr.btc_distance_stop > 0
+        ):
+            self._check_btc_distance_stop(snapshot, secs_remaining)
+
         # ── L9: SM Confirmation checkpoint ──
         if (
             self._sm_enabled
@@ -569,6 +606,64 @@ class ContrarianEvStrategy:
             and self._executor.pending_trade
         ):
             self._check_sm_confirmation(snapshot)
+
+    def _check_btc_distance_stop(
+        self, snapshot: DataSnapshot, secs_remaining: float
+    ) -> None:
+        """Exit position if BTC has moved too far against us vs window open.
+
+        Backtest validated: dist=$100, min_rem=60s → 91% helped rate,
+        +$74 PnL improvement over 2,263 trades. Scales linearly with
+        position size — at 10x sizing this becomes +$740.
+        """
+        trade = self._executor.pending_trade
+        if not trade:
+            return
+
+        should_stop = self._risk_mgr.should_stop_btc_distance(
+            side=trade.side,
+            btc_price_now=snapshot.binance_price,
+            btc_open_price=snapshot.oracle_window_open_price,
+            secs_remaining=secs_remaining,
+        )
+
+        if not should_stop:
+            return
+
+        # Exit at current best bid for our side
+        ob = snapshot.orderbook
+        if ob:
+            exit_price = (
+                ob.yes_best_bid if trade.side == "YES"
+                else ob.no_best_bid
+            )
+        else:
+            exit_price = trade.entry_price
+
+        if not exit_price or exit_price <= 0:
+            return
+
+        distance = abs(snapshot.binance_price - snapshot.oracle_window_open_price)
+        logger.warning(
+            "[%s] BTC distance stop: %s position, BTC moved $%.0f from "
+            "open (threshold $%.0f), exiting at $%.4f with %.0fs remaining",
+            self.name, trade.side, distance,
+            self._risk_mgr.btc_distance_stop, exit_price, secs_remaining,
+        )
+
+        exit_trade = self._executor.close_position_early(
+            exit_price=exit_price,
+            reason=f"BTC_DISTANCE_STOP_${distance:.0f}",
+        )
+        if exit_trade:
+            won = exit_trade.pnl is not None and exit_trade.pnl > 0
+            self._risk_mgr.record_result(exit_trade.pnl or 0)
+            self._last_trade_msg = (
+                f"{'W' if won else 'L'} {exit_trade.side} "
+                f"BTC DIST STOP ${exit_trade.pnl:+.2f} "
+                f"(BTC moved ${distance:.0f})"
+            )
+            logger.info(f"[{self.name}] {self._last_trade_msg}")
 
     def _check_sm_confirmation(self, snapshot: DataSnapshot) -> None:
         """L9: Check SM wallet flow and exit if SM disagrees.
@@ -835,10 +930,10 @@ class ContrarianEvStrategy:
                 "L6 Fade": self._fade_signal_val,
                 "L7 Taker": self._taker_ratio_val,
                 "L8 Flow": self._clob_flow_val,
-                "Absorb": self._absorption_val,
-                "L10 Exh": self._exhaustion_val,
-                "L11 Size": self._trade_size_val,
-                "L12 Wallet": self._wallet_flow_val,
+                **({"L9b Abs": self._absorption_val} if self._absorption else {}),
+                **({"L10 Exh": self._exhaustion_val} if self._exhaustion else {}),
+                **({"L11 Size": self._trade_size_val} if self._trade_size else {}),
+                **({"L12 Wallet": self._wallet_flow_val} if self._wallet_flow else {}),
             },
             "combined_signal": self._combined_signal,
             "prob_up": self._est_prob_up,
@@ -876,6 +971,14 @@ class ContrarianEvStrategy:
             "filter_skipped": dict(self._filter_skipped),
             "l9_status": self._sm_l9_status,
             "l9_enabled": self._sm_enabled,
+            "risk_details": {
+                "daily_trades": self._risk_mgr.daily_trades,
+                "daily_trade_cap": self._risk_mgr.daily_trade_cap,
+                "peak_bankroll": self._risk_mgr.peak_bankroll,
+                "drawdown_pct": self._risk_mgr.drawdown_pct,
+                "btc_distance_stop": self._risk_mgr.btc_distance_stop,
+                "streak_reduction": self._risk_mgr.streak_reduction_enabled,
+            },
         }
 
     def shutdown(self) -> None:

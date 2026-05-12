@@ -464,35 +464,31 @@ bots:
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
 
-  # -- Bot K: Signal-Aligned + SM Confirmation (L9 layer) --
-  # Identical strategy to Bot G, with the L9 SM confirmation layer enabled.
-  # At minutes 3 and 4, checks on-chain SM wallet flow. If SM disagrees
-  # with the position, exits early. Backtest: +56.3% PnL, DD 32.4%->9.9%.
-  # Run alongside Bot G to compare performance with/without L9.
+  # -- Bot K: Signal-Aligned + Enhanced Risk Management --
+  # Fork of Bot G with improved risk management (validated via backtest):
+  # - No streak size reduction (backtest showed it punishes normal variance)
+  # - BTC distance stop at $100 (91% helped rate, +$74 over 2,263 trades)
+  # - Drawdown breaker at 30% from peak
+  # - Daily trade cap at 150
+  # - Regime sizing: 1.5x in ranging, 0.75x in trending_up
+  # L9 SM confirmation disabled (too sparse data to be useful).
+  # Run alongside Bot G to compare performance with/without these changes.
   bot_k_sm_confirmation:
     strategy: contrarian_ev
     enabled: true
     db_path: ./data_runtime/bot_k_sm_confirmation.db
     weekend_flip: true
 
-    # L9: SM Confirmation Layer
+    # L9: SM Confirmation Layer — disabled (data too sparse, always IGNORE)
     sm_confirmation:
-      enabled: true
-      check_minutes: [4]           # min 3 is premature (-$43 impact), min 4 is +$15
-      exit_sides: [YES]            # only exit YES positions; NO side carries 86% of profit
-      agreement_threshold: 0.60
-      min_volume: 50.0             # backtest used 50.0
-      min_wallets: 0               # not available in on-chain data reliably
-      price_floor: 0.35            # position-relative price floor for actionable zone
-      price_ceiling: 0.65          # position-relative price ceiling for actionable zone
-      poll_interval: 3.0
+      enabled: false
 
     # Same filters as Bot G
     filters:
       yes_min_price: 0.40
       skip_regimes: [trending_down]
 
-    # Same regime, signals, entry, sizing, risk as Bot G
+    # Same regime, signals, entry, sizing as Bot G
     regime:
       detector: mtf
       trend_threshold: 0.30
@@ -536,16 +532,31 @@ bots:
       daily_loss_cap_pct: 0.20
       daily_loss_warn_pct: 0.15
       min_bankroll: 10.0
-      streak_reduce_at: 3
-      streak_reduce_factor: 0.75
-      streak_heavy_reduce_at: 5
-      streak_heavy_reduce_factor: 0.5
-      streak_pause_at: 7
+      # Streak reduction DISABLED — backtest showed win rate at 5 losses
+      # is actually 48.1% (highest), so reducing size punishes normal
+      # variance and costs money.
+      streak_reduction_enabled: false
+      streak_pause_at: 7            # keep the circuit breaker for extreme streaks
       streak_pause_minutes: 30
       streak_reset_wins: 3
       low_volatility_threshold: 0.0001
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
+      # BTC distance stop — exit when BTC moves $100+ against us vs
+      # window open. Backtest: dist=$100, min_rem=60s → 91% helped,
+      # +$74.20 over 2,263 trades. Scales with position size.
+      btc_distance_stop: 100.0
+      btc_distance_min_secs_remaining: 60.0
+      # Drawdown breaker — pause all trading if bankroll drops 30%
+      # from peak. Prevents catastrophic spirals.
+      drawdown_pct: 0.30
+      # Daily trade cap — 150 trades max per UTC day.
+      daily_trade_cap: 150
+      # Regime sizing — size up in ranging (where contrarian edge is
+      # strongest) and reduce in trending_up (marginal edge).
+      regime_size_overrides:
+        ranging: 1.5
+        trending_up: 0.75
 
   # -- Bot F: Latency Arbitrage (exploits Binance->CLOB delay) --
   # Fundamentally different from Bots A-E: no signal prediction.
