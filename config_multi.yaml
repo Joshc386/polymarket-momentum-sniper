@@ -405,10 +405,16 @@ bots:
     # Data-driven filters from 1,321-trade review (Apr 14-24):
     # - YES bets < $0.40: lost $157 over 611 trades
     # - trending_down regime: 34% WR (below break-even), -$69 total
-    # Set yes_min_price to 0 and skip_regimes to [] to disable.
+    # High-EV early-window filter (added 2026-05-13, backtest commit bacc760):
+    # - Skipping EV>=0.15 trades at 0-60s into window saves -$213 PnL on
+    #   Bot G's historical data while preserving the late high-EV winners
+    #   (50 trades, +$171). Mechanism: early-window high-EV signals are
+    #   noisy (no momentum history, orderbook unsettled).
     filters:
       yes_min_price: 0.40
       skip_regimes: [trending_down]
+      high_ev_threshold: 0.15
+      high_ev_min_secs_into_window: 60.0
 
     regime:
       detector: mtf
@@ -490,10 +496,12 @@ bots:
     sm_confirmation:
       enabled: false
 
-    # Same filters as Bot G
+    # Same filters as Bot G (including high-EV early-window filter added 2026-05-13)
     filters:
       yes_min_price: 0.40
       skip_regimes: [trending_down]
+      high_ev_threshold: 0.15
+      high_ev_min_secs_into_window: 60.0
 
     # Same regime as Bot G
     regime:

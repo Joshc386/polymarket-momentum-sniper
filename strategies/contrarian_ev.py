@@ -251,9 +251,23 @@ class ContrarianEvStrategy:
         self._yes_min_price = filter_cfg.get("yes_min_price", 0.0)
         self._skip_regimes = set(filter_cfg.get("skip_regimes", []))
         self._min_depth_multiplier = filter_cfg.get("min_depth_multiplier", 5.0)
+        # High-EV early-window filter (added 2026-05-13). Blocks premature
+        # high-EV entries: when the model estimates high EV very early in
+        # the window, it's typically reacting to noise (no momentum history,
+        # orderbook unsettled). Backtest on 2,388 Bot G trades: skipping
+        # high-EV (>=0.15) trades in the first 60s saves -$213 PnL while
+        # preserving the +$171 PnL from late high-EV winners.
+        # Set high_ev_min_secs_into_window: 0 to disable.
+        self._high_ev_threshold = filter_cfg.get("high_ev_threshold", 0.15)
+        self._high_ev_min_secs_into_window = filter_cfg.get(
+            "high_ev_min_secs_into_window", 0.0
+        )
         self._last_orderbook = None  # stored each tick for filter access
         # Track how often each filter fires (for dashboard/diagnostics)
-        self._filter_skipped = {"yes_low_price": 0, "regime": 0, "low_liquidity": 0}
+        self._filter_skipped = {
+            "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
+            "high_ev_early": 0,
+        }
 
         # Execution engine (independent bankroll + trade history)
         self._executor = PaperExecutionEngine(
@@ -578,7 +592,9 @@ class ContrarianEvStrategy:
                 # ── Post-decision filters (data-driven exclusions) ──
                 # These override the entry_logic decision when historical
                 # evidence shows the specific trade shape is a loser.
-                skip_reason = self._apply_entry_filters(self._entry_decision)
+                skip_reason = self._apply_entry_filters(
+                    self._entry_decision, secs_remaining
+                )
                 if skip_reason:
                     self._entry_decision = EntryDecision(
                         reason=f"Filtered: {skip_reason}"
@@ -771,7 +787,7 @@ class ContrarianEvStrategy:
         except Exception as e:
             logger.error("[%s] L9 SM check failed: %s", self.name, e, exc_info=True)
 
-    def _apply_entry_filters(self, decision) -> str:
+    def _apply_entry_filters(self, decision, secs_remaining: float) -> str:
         """Check data-driven exclusion filters. Returns skip reason or ''.
 
         Filters (disabled by setting config values to 0 or empty list):
@@ -780,6 +796,11 @@ class ContrarianEvStrategy:
             lose money consistently — likely catching falling knives.
           - skip_regimes: Skip trades in specified regimes. trending_down
             historically had 34% WR, clearly below break-even.
+          - high_ev_min_secs_into_window: Skip if estimated EV >= threshold
+            AND less than N seconds have elapsed in the window. Early-window
+            high-EV signals are noisy (no momentum history, orderbook
+            unsettled). Late-window high-EV signals reference real moves.
+            Backtest: skipping high-EV at 0-60s into window saves -$213.
           - min_depth_multiplier: Skip if ask-side depth < N× our order
             size. Prevents walking the book on thin markets. At $5 stakes
             this rarely fires; becomes important when sizing up.
@@ -795,6 +816,20 @@ class ContrarianEvStrategy:
             if regime_label in self._skip_regimes:
                 self._filter_skipped["regime"] += 1
                 return f"regime={regime_label}"
+
+        # High-EV early-window filter: block premature high-confidence trades.
+        # Late high-EV trades (60-120s remaining) are kept — those reference
+        # real moves and are profitable in the backtest.
+        if self._high_ev_min_secs_into_window > 0:
+            secs_into_window = 300.0 - secs_remaining
+            if (decision.best_ev >= self._high_ev_threshold
+                    and secs_into_window < self._high_ev_min_secs_into_window):
+                self._filter_skipped["high_ev_early"] += 1
+                return (
+                    f"high_ev_early: ev={decision.best_ev:.3f} "
+                    f"at {secs_into_window:.0f}s into window "
+                    f"(min={self._high_ev_min_secs_into_window:.0f}s)"
+                )
 
         # Liquidity check: ensure ask-side depth can absorb our order
         if self._min_depth_multiplier > 0 and decision.price > 0:
@@ -973,6 +1008,10 @@ class ContrarianEvStrategy:
             "filters_active": {
                 "yes_min_price": self._yes_min_price,
                 "skip_regimes": list(self._skip_regimes),
+                "high_ev_threshold": self._high_ev_threshold,
+                "high_ev_min_secs_into_window": (
+                    self._high_ev_min_secs_into_window
+                ),
             },
             "filter_skipped": dict(self._filter_skipped),
             "l9_status": self._sm_l9_status,
