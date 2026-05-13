@@ -7,6 +7,7 @@ been running in paper trading. No modifications from the original logic.
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -38,6 +39,7 @@ from strategy.sm_confirmation import (
     check_sm_confirmation,
 )
 from strategy.sm_decision_log import SMDecisionLogger
+from strategy.signal_diagnostic_log import SignalDiagnosticLogger, SignalTick
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +270,24 @@ class ContrarianEvStrategy:
             "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
             "high_ev_early": 0,
         }
+
+        # Per-tick signal diagnostic logger (off by default; enable in config
+        # with `signal_diagnostic: enabled: true`). Captures all signal values
+        # every tick, not just on trades. Used to diagnose signal bias issues
+        # like the 100% YES bias observed May 11+ 2026.
+        diag_cfg = cfg.get("signal_diagnostic", {})
+        self._signal_diag = None
+        if diag_cfg.get("enabled", False):
+            default_diag_path = os.path.join(
+                "data_runtime", f"{self.name}_signal_diag.db"
+            )
+            diag_path = diag_cfg.get("db_path", default_diag_path)
+            self._signal_diag = SignalDiagnosticLogger(
+                db_path=diag_path,
+                bot_name=self.name,
+                enabled=True,
+                sample_every_n=diag_cfg.get("sample_every_n", 1),
+            )
 
         # Execution engine (independent bankroll + trade history)
         self._executor = PaperExecutionEngine(
@@ -628,6 +648,104 @@ class ContrarianEvStrategy:
             and self._executor.pending_trade
         ):
             self._check_sm_confirmation(snapshot)
+
+        # ── Signal diagnostic logging (off by default) ──
+        # Captures every tick's full signal state for offline analysis.
+        # Used to diagnose signal bias issues. No effect on trading logic.
+        if self._signal_diag is not None and ob:
+            self._log_signal_diagnostic(
+                snapshot, ob, secs_remaining, _schedule_override
+            )
+
+    def _log_signal_diagnostic(
+        self,
+        snapshot: DataSnapshot,
+        ob,
+        secs_remaining: float,
+        schedule_override: str,
+    ) -> None:
+        """Write one row to the signal diagnostic DB. Best-effort, non-fatal."""
+        try:
+            mkt = snapshot.market
+            decision = self._entry_decision
+            # market_implied_prob from midpoint
+            mkt_mid_yes = (ob.yes_best_bid + ob.yes_best_ask) / 2.0 if ob else 0.5
+
+            # Determine "would_pick_side" mirroring entry_logic.signal_aligned
+            if self._est_prob_up >= 0.5:
+                would_side = "YES"
+            else:
+                would_side = "NO"
+
+            tick = SignalTick(
+                market_id=mkt.condition_id if mkt else "",
+                market_slug=mkt.slug if mkt else "",
+                secs_remaining=secs_remaining,
+                secs_into_window=300.0 - secs_remaining,
+                btc_price=snapshot.binance_price or 0.0,
+                oracle_price=snapshot.oracle_price or 0.0,
+                oracle_open_price=snapshot.oracle_window_open_price or 0.0,
+                coinbase_price=getattr(snapshot, "coinbase_price", 0.0) or 0.0,
+                regime=(
+                    self._current_regime.regime.value
+                    if self._current_regime else ""
+                ),
+                schedule_override=schedule_override or "",
+                # Core L1-L5
+                l1_oracle_lag=self._oracle_lag_val,
+                l2_momentum=self._momentum_val,
+                l3_liquidation=self._liquidation_val,
+                l4_orderbook=self._ob_signal_val,
+                l5_sentiment=self._sentiment_val,
+                # L1 sub-components (exposed by oracle_lag.py)
+                l1_lag_component=getattr(self._oracle_lag, "last_lag_component", 0.0),
+                l1_open_component=getattr(self._oracle_lag, "last_open_component", 0.0),
+                # L4 sub-components (exposed by orderbook_signal.py)
+                l4_imbalance=getattr(self._orderbook, "last_imbalance", 0.0),
+                l4_flow=getattr(self._orderbook, "last_flow", 0.0),
+                l4_mid_dev=getattr(self._orderbook, "last_mid_dev", 0.0),
+                l4_top_pressure=getattr(self._orderbook, "last_top_pressure", 0.0),
+                l4_thickness=getattr(self._orderbook, "last_thickness", 0.0),
+                # Additive signals
+                l6_fade=self._fade_signal_val,
+                l7_taker_ratio=self._taker_ratio_val,
+                l8_clob_flow=self._clob_flow_val,
+                l9b_absorption=self._absorption_val,
+                l10_exhaustion=self._exhaustion_val,
+                l11_trade_size=self._trade_size_val,
+                l12_wallet_flow=self._wallet_flow_val,
+                # Cross-exchange and combination
+                coinbase_direction=self._coinbase_dir,
+                combined_signal=self._combined_signal,
+                est_prob_up=self._est_prob_up,
+                market_implied_prob=mkt_mid_yes,
+                prob_edge=decision.prob_edge if decision else 0.0,
+                required_edge=decision.required_edge if decision else 0.0,
+                # Weights actually used
+                w_oracle=self._current_weights[0] if self._current_weights else 0.0,
+                w_momentum=self._current_weights[1] if self._current_weights else 0.0,
+                w_liquidation=self._current_weights[2] if self._current_weights else 0.0,
+                w_orderbook=self._current_weights[3] if self._current_weights else 0.0,
+                w_sentiment=self._current_weights[4] if self._current_weights else 0.0,
+                # Entry decision
+                would_pick_side=would_side,
+                would_enter=1 if (decision and decision.should_enter) else 0,
+                entry_reason=decision.reason if decision else "",
+                # Filter/risk
+                filter_blocked=(
+                    decision.reason if decision and decision.reason.startswith("Filtered:")
+                    else ""
+                ),
+                risk_can_trade=1 if self._risk_state.can_trade else 0,
+                risk_reason=self._risk_state.reason or "",
+                trade_placed=1 if (decision and decision.should_enter and
+                                    not (decision.reason or "").startswith("Filtered:"))
+                              else 0,
+            )
+            self._signal_diag.log(tick)
+        except Exception as e:
+            # Best-effort logging. Never let diagnostic logging crash the bot.
+            logger.debug("Signal diag logging failed: %s", e)
 
     def _check_btc_distance_stop(
         self, snapshot: DataSnapshot, secs_remaining: float
@@ -1029,4 +1147,6 @@ class ContrarianEvStrategy:
     def shutdown(self) -> None:
         """Close database connection."""
         self._db.close()
+        if self._signal_diag is not None:
+            self._signal_diag.close()
         logger.info(f"[{self.name}] Shut down")

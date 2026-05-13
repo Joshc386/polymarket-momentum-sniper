@@ -402,6 +402,15 @@ bots:
     db_path: ./data_runtime/bot_g_signal_aligned.db
     weekend_flip: true
 
+    # Per-tick signal diagnostic logger (2026-05-13). Captures every tick's
+    # full signal state to data_runtime/<bot>_signal_diag.db for offline
+    # analysis. Enabled to diagnose the 100% YES bias issue (see decisions
+    # J9 to be added once root cause confirmed). Disable by setting
+    # enabled: false. Sample_every_n=1 logs every tick (~2/sec).
+    signal_diagnostic:
+      enabled: true
+      sample_every_n: 1
+
     # Data-driven filters from 1,321-trade review (Apr 14-24):
     # - YES bets < $0.40: lost $157 over 611 trades
     # - trending_down regime: 34% WR (below break-even), -$69 total
@@ -491,6 +500,13 @@ bots:
     enabled: true
     db_path: ./data_runtime/bot_k_sm_confirmation.db
     weekend_flip: true
+
+    # Per-tick signal diagnostic logger (2026-05-13). Captures every tick's
+    # full signal state. Both Bot G and Bot K log so we can compare the
+    # signal computation across the two bots side-by-side.
+    signal_diagnostic:
+      enabled: true
+      sample_every_n: 1
 
     # L9: SM Confirmation Layer — disabled (data too sparse, always IGNORE)
     sm_confirmation:

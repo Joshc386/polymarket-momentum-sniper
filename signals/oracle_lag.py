@@ -30,17 +30,23 @@ class OracleLagSignal:
         Returns:
             Signal between -1.0 (strong bearish) and 1.0 (strong bullish).
         """
+        # Reset diagnostic sub-components — written below if computed.
+        self.last_lag_component = 0.0
+        self.last_open_component = 0.0
+
         if oracle_price <= 0 or exchange_price <= 0:
             return 0.0
 
         # Primary: exchange vs current oracle (detects where price is heading)
         lag_delta = (exchange_price - oracle_price) / oracle_price
         lag_signal = self._clamp(lag_delta / self.max_expected_lag)
+        self.last_lag_component = lag_signal
 
         # Secondary: exchange vs window open oracle (actual resolution comparison)
         if oracle_open_price > 0:
             open_delta = (exchange_price - oracle_open_price) / oracle_open_price
             open_signal = self._clamp(open_delta / self.max_expected_lag)
+            self.last_open_component = open_signal
             # Blend: 60% lag signal, 40% open comparison
             return self._clamp(0.6 * lag_signal + 0.4 * open_signal)
 

@@ -124,6 +124,15 @@ class OrderbookSignal:
         else:
             smoothed_flow = flow
 
+        # Expose sub-components as instance attrs for diagnostic logging.
+        # These don't affect computation — they're read by SignalDiagnosticLogger
+        # to break down which sub-component is driving L4 in real time.
+        self.last_imbalance = smoothed_imbalance
+        self.last_flow = smoothed_flow
+        self.last_mid_dev = mid_dev
+        self.last_top_pressure = top_pressure
+        self.last_thickness = thickness
+
         # Combine sub-signals
         raw = (
             self.imbalance_weight * smoothed_imbalance
