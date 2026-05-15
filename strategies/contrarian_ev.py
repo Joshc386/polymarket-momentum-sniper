@@ -1015,6 +1015,26 @@ class ContrarianEvStrategy:
             size_multiplier=self._risk_state.size_multiplier,
         )
         if bet_size <= 0:
+            # Sizer rejected the trade. Log the values so we know why and
+            # mark the decision so the dashboard doesn't keep showing a
+            # phantom SIGNAL line.
+            logger.warning(
+                "[%s] Sizer rejected trade: side=%s price=%.4f "
+                "win_prob=%.4f est_prob_up=%.4f bankroll=%.2f "
+                "size_mult=%.4f best_ev=%.4f prob_edge=%.4f "
+                "required_edge=%.4f | %s",
+                self.name, ed.side, ed.price,
+                win_prob, self._est_prob_up,
+                self._executor.bankroll,
+                self._risk_state.size_multiplier,
+                ed.best_ev, ed.prob_edge, ed.required_edge,
+                ed.reason,
+            )
+            # Replace entry_decision so dashboard shows the real state
+            # rather than a stale SIGNAL line that never traded.
+            self._entry_decision = EntryDecision(
+                reason=f"Sizer rejected ({ed.side} @ ${ed.price:.3f}, win_prob={win_prob:.3f})"
+            )
             return
 
         weights_json = json.dumps({
