@@ -264,8 +264,15 @@ bots:
       low_vol_percentile: 0.20
       alignment_weight: 0.55
       stickiness: 3
-      allowed_regimes: [trending_up, trending_down, ranging]
-      block_regimes: [high_vol, low_vol]
+      # 2026-05-14: high_vol unblocked. Backtest on 27.6h of diagnostic
+      # data (128 simulated trades) showed high_vol would have been MORE
+      # profitable than ranging (62.5% WR, +$1.04/trade, Sharpe 0.33).
+      # Natural throttles still apply: edge_multiplier 1.8 and
+      # size_multiplier 0.5 from REGIME_PARAMS in regime_detector.py.
+      # low_vol stays blocked (edge_multiplier 999 makes it dead anyway).
+      # See backtest/high_vol_regime_validation.py.
+      allowed_regimes: [trending_up, trending_down, ranging, high_vol]
+      block_regimes: [low_vol]
 
     signals:
       oracle_lag:
@@ -432,8 +439,15 @@ bots:
       low_vol_percentile: 0.20
       alignment_weight: 0.55
       stickiness: 3
-      allowed_regimes: [trending_up, trending_down, ranging]
-      block_regimes: [high_vol, low_vol]
+      # 2026-05-14: high_vol unblocked. Backtest on 27.6h of diagnostic
+      # data (128 simulated trades) showed high_vol would have been MORE
+      # profitable than ranging (62.5% WR, +$1.04/trade, Sharpe 0.33).
+      # Natural throttles still apply: edge_multiplier 1.8 and
+      # size_multiplier 0.5 from REGIME_PARAMS in regime_detector.py.
+      # low_vol stays blocked (edge_multiplier 999 makes it dead anyway).
+      # See backtest/high_vol_regime_validation.py.
+      allowed_regimes: [trending_up, trending_down, ranging, high_vol]
+      block_regimes: [low_vol]
 
     signals:
       oracle_lag:
