@@ -182,6 +182,23 @@ class ContrarianEvStrategy:
             wallet_flow_weight=sig_cfg.get("wallet_flow_weight", 0.0),
         )
 
+        # ── Ranging-regime override behaviour ──
+        # Historically, when the regime detector classified RANGING, the
+        # strategy did TWO things automatically:
+        #   1. Override `weight_schedule` to "ranging" (L4-dominant blend)
+        #   2. Switch entry mode from "contrarian" to "signal-aligned"
+        #      (follow the model's directional call rather than fade market)
+        # This was the right call for Bot G's default weights. But for bots
+        # with a walk-forward-optimised schedule (e.g. Bot K's
+        # `bot_k_optimised`), the override clobbers those optimised weights
+        # in the regime where the bot spends most of its time — defeating
+        # the whole point of the optimisation.
+        #
+        # Default is True to preserve existing Bot G behaviour. Bots that
+        # explicitly choose a schedule (Bot K) should set this to False to
+        # use their schedule + signal-aligned mode at all times.
+        self._use_ranging_override = sig_cfg.get("use_ranging_override", True)
+
         # Strategy components
         entry_cfg = cfg.get("entry", {})
         self._entry_logic = EntryLogic(
@@ -520,9 +537,14 @@ class ContrarianEvStrategy:
         # Combine signals
         is_weekend = datetime.now(timezone.utc).weekday() >= 5
 
-        # Select weight schedule based on regime
+        # Select weight schedule based on regime. The override only fires
+        # if this bot opted in via use_ranging_override (default True). Bots
+        # with an explicit optimised schedule (Bot K) opt out so their
+        # schedule is preserved through ranging regime.
         _schedule_override = ""
-        if self._current_regime and self._current_regime.regime == Regime.RANGING:
+        if (self._use_ranging_override
+                and self._current_regime
+                and self._current_regime.regime == Regime.RANGING):
             _schedule_override = "ranging"
 
         self._current_weights = self._combiner.get_weights(secs_remaining, _schedule_override)
@@ -605,7 +627,14 @@ class ContrarianEvStrategy:
                 seconds_remaining=secs_remaining,
                 has_position=self._has_position,
                 regime_edge_multiplier=regime_edge_mult,
-                signal_aligned=_schedule_override == "ranging",
+                # signal_aligned: follow the model's directional call rather
+                # than fade the market. Used:
+                #   - When ranging override fires (existing Bot G behaviour)
+                #   - Always for bots that opted out of ranging override
+                #     (Bot K-style: optimised weights are designed to
+                #     predict direction, contrarian mode would invert them)
+                signal_aligned=(_schedule_override == "ranging"
+                                or not self._use_ranging_override),
             )
 
             if self._entry_decision.should_enter:

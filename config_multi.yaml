@@ -533,7 +533,7 @@ bots:
       high_ev_threshold: 0.15
       high_ev_min_secs_into_window: 60.0
 
-    # Same regime as Bot G
+    # Same regime as Bot G (with 2026-05-14 high_vol unblock).
     regime:
       detector: mtf
       trend_threshold: 0.30
@@ -541,8 +541,10 @@ bots:
       low_vol_percentile: 0.20
       alignment_weight: 0.55
       stickiness: 3
-      allowed_regimes: [trending_up, trending_down, ranging]
-      block_regimes: [high_vol, low_vol]
+      # 2026-05-14: high_vol unblocked (see decisions_BTC J10 and Bot G
+      # for full rationale and backtest evidence).
+      allowed_regimes: [trending_up, trending_down, ranging, high_vol]
+      block_regimes: [low_vol]
 
     # Signals — walk-forward optimised core weights (7/7 folds beat default)
     # Backtest: 13,867 markets, +180.24 PnL improvement OOS vs Bot G defaults.
@@ -550,6 +552,11 @@ bots:
     # L9b-L12 at conservative 0.05 (no backtest data available for these).
     signals:
       weight_schedule: bot_k_optimised  # momentum-dominant schedule
+      # 2026-05-14: opt out of the ranging-regime override. Without this,
+      # ranging regime would clobber bot_k_optimised with the "ranging"
+      # schedule (L4-dominant), defeating the walk-forward optimisation.
+      # See decisions_BTC J11.
+      use_ranging_override: false
       oracle_lag:
         max_expected_lag: 0.001
       momentum:
