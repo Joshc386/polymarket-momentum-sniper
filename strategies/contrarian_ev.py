@@ -978,17 +978,27 @@ class ContrarianEvStrategy:
                     f"(min={self._high_ev_min_secs_into_window:.0f}s)"
                 )
 
-        # Liquidity check: ensure ask-side depth can absorb our order
+        # Liquidity check: ensure ask-side depth can absorb our order.
+        # 2026-05-15: OrderbookSummary has a `yes_ask_depth` field
+        # (top-5 sum) but no equivalent `no_ask_depth` field — only the
+        # `no_ask_levels` list and `no_ask_total_size`. Before this fix,
+        # NO-side trades raised AttributeError every tick, the exception
+        # bubbled up, multi_runner caught it but the entry_decision was
+        # never updated, so the dashboard kept showing a phantom SIGNAL:
+        # NO line and no trade ever placed. Fix: compute NO top-5 depth
+        # inline from `no_ask_levels` to mirror how `yes_ask_depth` is built.
         if self._min_depth_multiplier > 0 and decision.price > 0:
             ob = self._last_orderbook
             if ob:
                 # Use max bet size as conservative estimate (actual size
                 # computed later by Kelly, but max is the worst case)
                 intended_shares = self._sizer.max_bet_usdc / decision.price
-                ask_depth = (
-                    ob.yes_ask_depth if decision.side == "YES"
-                    else ob.no_ask_depth
-                )
+                if decision.side == "YES":
+                    ask_depth = ob.yes_ask_depth
+                else:
+                    # Compute top-5 NO ask depth from levels list
+                    no_levels = getattr(ob, "no_ask_levels", None) or []
+                    ask_depth = sum(l.size for l in no_levels[:5])
                 if ask_depth > 0 and ask_depth < intended_shares * self._min_depth_multiplier:
                     self._filter_skipped["low_liquidity"] += 1
                     return (
