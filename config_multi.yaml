@@ -574,6 +574,14 @@ bots:
       exhaustion_weight: 0.05          # L10: level exhaustion patterns
       trade_size_weight: 0.05          # L11: trade size conviction
       wallet_flow_weight: 0.05         # L12: on-chain wallet flow
+      # J13 directional signal gating (2026-05-21): when |L1| > gate_threshold,
+      # clamp L4 mid_dev/top_pressure + L7 taker_ratio so they can amplify L1
+      # but never contradict it. Symmetric across bullish/bearish L1.
+      # Past-7d backtest (1121 ticks): suppresses 137 NO trades (88% losers,
+      # +$205 saved), 0 YES trades affected adversely. See decisions_BTC J13.
+      # Bot G intentionally NOT enabled — A/B comparison preserved.
+      directional_signal_gating: true
+      gate_threshold: 0.4
 
     entry:
       min_edge: 0.003

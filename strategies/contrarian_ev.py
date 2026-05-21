@@ -180,6 +180,11 @@ class ContrarianEvStrategy:
             exhaustion_weight=sig_cfg.get("exhaustion_weight", 0.0),
             trade_size_weight=sig_cfg.get("trade_size_weight", 0.0),
             wallet_flow_weight=sig_cfg.get("wallet_flow_weight", 0.0),
+            # J13 directional gating (opt-in per bot; default off)
+            directional_signal_gating=sig_cfg.get(
+                "directional_signal_gating", False
+            ),
+            gate_threshold=sig_cfg.get("gate_threshold", 0.4),
         )
 
         # ── Ranging-regime override behaviour ──
@@ -566,6 +571,13 @@ class ContrarianEvStrategy:
             trade_size_signal=self._trade_size_val,
             wallet_flow_signal=self._wallet_flow_val,
             schedule_override=_schedule_override,
+            # J13: L4 sub-components (used only if directional_signal_gating
+            # is enabled in this bot's config — passing them is no-op otherwise)
+            l4_imbalance=getattr(self._orderbook, "last_imbalance", 0.0),
+            l4_flow=getattr(self._orderbook, "last_flow", 0.0),
+            l4_mid_dev=getattr(self._orderbook, "last_mid_dev", 0.0),
+            l4_top_pressure=getattr(self._orderbook, "last_top_pressure", 0.0),
+            l4_thickness=getattr(self._orderbook, "last_thickness", 0.0),
         )
 
         # ── Risk check ──

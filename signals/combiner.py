@@ -98,6 +98,30 @@ class SignalCombiner:
     trade_size_weight: float = 0.0  # L11: trade size conviction (disabled by default)
     wallet_flow_weight: float = 0.0  # L12: on-chain wallet flow (disabled by default)
 
+    # ── Directional signal gating (J13 NO-side fix, 2026-05-21) ──
+    # When enabled and |oracle_lag_signal| > gate_threshold, clamp the L4
+    # mid_dev, L4 top_pressure, and L7 taker_ratio sub-signals so they can
+    # only amplify L1's direction — never contradict it. Symmetric.
+    #
+    # Rationale: empirical post-mortem of Bot K/G NO-side losses showed
+    # these three sub-signals fire false-bearish in post-rally
+    # consolidation (when L1 is positive but micro-flow looks like
+    # mean-reversion). The bearish micro-noise was outweighing L1's correct
+    # bullish reading and producing systematically-losing NO trades.
+    # Gating preserves YES path strictly (only ever clamps contradictions)
+    # and restores symmetric NO entries on genuine downtrends.
+    directional_signal_gating: bool = False
+    gate_threshold: float = 0.4
+
+    # L4 sub-component weights — used only when the gating logic
+    # re-aggregates L4 from sub-components. Defaults match
+    # signals/orderbook_signal.py OrderbookSignal weights.
+    l4_imbalance_weight: float = 0.30
+    l4_flow_weight: float = 0.25
+    l4_mid_dev_weight: float = 0.20
+    l4_top_pressure_weight: float = 0.15
+    l4_thickness_weight: float = 0.10
+
     def __post_init__(self) -> None:
         self._schedule = WEIGHT_SCHEDULES.get(
             self.weight_schedule_name, WEIGHT_SCHEDULE_DEFAULT
@@ -144,6 +168,11 @@ class SignalCombiner:
         trade_size_signal: float = 0.0,
         wallet_flow_signal: float = 0.0,
         schedule_override: str = "",
+        l4_imbalance: float = 0.0,
+        l4_flow: float = 0.0,
+        l4_mid_dev: float = 0.0,
+        l4_top_pressure: float = 0.0,
+        l4_thickness: float = 0.0,
     ) -> tuple[float, float]:
         """Combine signals into estimated probability of UP.
 
@@ -207,6 +236,53 @@ class SignalCombiner:
                 w3 /= total
                 w4 /= total
                 w5 /= total
+
+        # ── Directional signal gating (J13 fix) ──
+        # If enabled and L1 has strong directional conviction, clamp L4
+        # mid_dev, L4 top_pressure, and L7 taker_ratio so they can only
+        # amplify L1's direction. Symmetric on both sides. Backwards-
+        # compatible — only fires when flag is on AND |L1| > threshold.
+        if self.directional_signal_gating:
+            l4_subs_provided = (
+                l4_imbalance != 0.0 or l4_flow != 0.0
+                or l4_mid_dev != 0.0 or l4_top_pressure != 0.0
+                or l4_thickness != 0.0
+            )
+            if oracle_lag_signal > self.gate_threshold:
+                # Strong bullish L1 → clamp bearish noise to be non-negative.
+                # Gating is strictly one-way: it may amplify L1's direction
+                # but never reduce it. Re-aggregated L4 is taken via max()
+                # to guarantee monotonicity even when sub-components don't
+                # exactly reconstruct the passed orderbook_signal (the L4
+                # module applies smoothing this re-aggregation doesn't).
+                taker_ratio_signal = max(0.0, taker_ratio_signal)
+                if l4_subs_provided:
+                    gated_mid_dev = max(0.0, l4_mid_dev)
+                    gated_top_pressure = max(0.0, l4_top_pressure)
+                    reaggregated = max(-1.0, min(1.0, (
+                        self.l4_imbalance_weight * l4_imbalance
+                        + self.l4_flow_weight * l4_flow
+                        + self.l4_mid_dev_weight * gated_mid_dev
+                        + self.l4_top_pressure_weight * gated_top_pressure
+                        + self.l4_thickness_weight * l4_thickness
+                    )))
+                    # One-way: keep the more bullish of {passed, re-aggregated}
+                    orderbook_signal = max(orderbook_signal, reaggregated)
+            elif oracle_lag_signal < -self.gate_threshold:
+                # Symmetric: strong bearish L1 → clamp bullish noise non-positive.
+                taker_ratio_signal = min(0.0, taker_ratio_signal)
+                if l4_subs_provided:
+                    gated_mid_dev = min(0.0, l4_mid_dev)
+                    gated_top_pressure = min(0.0, l4_top_pressure)
+                    reaggregated = max(-1.0, min(1.0, (
+                        self.l4_imbalance_weight * l4_imbalance
+                        + self.l4_flow_weight * l4_flow
+                        + self.l4_mid_dev_weight * gated_mid_dev
+                        + self.l4_top_pressure_weight * gated_top_pressure
+                        + self.l4_thickness_weight * l4_thickness
+                    )))
+                    # One-way: keep the more bearish of {passed, re-aggregated}
+                    orderbook_signal = min(orderbook_signal, reaggregated)
 
         # Redistribute weights for unavailable signals
         unavailable_weight = 0.0
