@@ -1,18 +1,16 @@
 """Live 3-exchange BTC/USD price comparison monitor.
 
 Standalone diagnostic — does NOT interact with the running bots.
-Connects to Binance.US, Coinbase, and Kraken in parallel — all three
+Connects to Coinbase, Kraken, and Bitstamp in parallel — all three
 are USD-native (no USDT basis distortion). Displays the live aggregate
 and logs every sample to a CSV for offline analysis.
 
-Note: Binance.US (not Binance.com) is used because Binance.com only
-offers BTC/USDT — no BTC/USD spot pair. Binance.US has lower volume
-but is USD-native. If Binance.US is geo-restricted from your IP, you
-will see [OFF] for that feed; fall back to Coinbase + Kraken alone
-(or swap in Binance.com BTCUSDC manually).
+Note: Binance.US was previously included but is geo-blocked from
+UK/EU IPs (only ~1 price/min reaches us), so it's been removed.
+Bitstamp replaces it as the third USD-native venue.
 
-Purpose: compare the 3-exchange USD-native average to the Polymarket UI
-BTC price. Polymarket settles in USD via Chainlink BTC/USD, so a
+Purpose: compare the USD-native average to the Polymarket UI BTC
+price. Polymarket settles in USD via Chainlink BTC/USD, so a
 USD-native aggregate should track it within ~$5-$15.
 
 Usage:
@@ -36,7 +34,7 @@ from datetime import datetime, timezone
 logging.basicConfig(level=logging.ERROR)
 
 # Import after logging is configured
-from data.binance_us_feed import BinanceUSFeed  # noqa: E402  (BTC/USD native)
+from data.bitstamp_feed import BitstampFeed  # noqa: E402
 from data.coinbase_feed import CoinbaseFeed  # noqa: E402
 from data.kraken_feed import KrakenFeed  # noqa: E402
 
@@ -61,14 +59,14 @@ def fmt_age(seconds: float) -> str:
 
 
 async def main() -> None:
-    binance = BinanceUSFeed()  # BTC/USD native (NOT Binance.com which is USDT-only)
     coinbase = CoinbaseFeed()
     kraken = KrakenFeed()
+    bitstamp = BitstampFeed()
 
-    # Start all 3 feeds in background tasks
-    binance_task = asyncio.create_task(binance.start())
+    # Start feeds in background tasks
     coinbase_task = asyncio.create_task(coinbase.start())
     kraken_task = asyncio.create_task(kraken.start())
+    bitstamp_task = asyncio.create_task(bitstamp.start())
 
     # CSV setup
     os.makedirs(CSV_DIR, exist_ok=True)
@@ -76,9 +74,9 @@ async def main() -> None:
     writer = csv.writer(csv_file)
     writer.writerow([
         "timestamp_utc",
-        "binance_us_price", "binance_us_age_s",
         "coinbase_price", "coinbase_age_s",
         "kraken_price", "kraken_age_s",
+        "bitstamp_price", "bitstamp_age_s",
         "mean_3", "median_3", "spread_3", "n_feeds_active",
     ])
 
@@ -87,7 +85,7 @@ async def main() -> None:
     csv_writes = 0
 
     # Give feeds time to connect
-    print("\nConnecting to Binance, Coinbase, Kraken...")
+    print("\nConnecting to Coinbase, Kraken, Bitstamp...")
     print(f"CSV: {CSV_PATH}")
     print("Wait ~5 seconds for initial connections...\n")
     await asyncio.sleep(5)
@@ -103,12 +101,12 @@ async def main() -> None:
             ts_iso = datetime.now(timezone.utc).isoformat()
 
             feeds = [
-                ("Binance.US BTC/USD", binance, binance.price,
-                 (now - binance.received_at) if binance.received_at > 0 else 999),
                 ("Coinbase   BTC/USD", coinbase, coinbase.price,
                  (now - coinbase.received_at) if coinbase.received_at > 0 else 999),
                 ("Kraken     BTC/USD", kraken, kraken.price,
                  (now - kraken.received_at) if kraken.received_at > 0 else 999),
+                ("Bitstamp   BTC/USD", bitstamp, bitstamp.price,
+                 (now - bitstamp.received_at) if bitstamp.received_at > 0 else 999),
             ]
 
             active_prices = [p for _, _, p, age in feeds if p > 0 and age < 10]
@@ -123,19 +121,19 @@ async def main() -> None:
             else:
                 mean_p = median_p = spread = 0.0
 
-            # All three feeds are now USD-native (Binance.US, Coinbase, Kraken).
-            # No more USDT basis distortion. Aggregate should track Polymarket
+            # All three feeds are USD-native (Coinbase, Kraken, Bitstamp).
+            # No USDT basis distortion. Aggregate should track Polymarket
             # Chainlink BTC/USD within ~$5-$15 if the feeds are healthy.
 
             # Write CSV row every tick
             writer.writerow([
                 ts_iso,
-                f"{binance.price:.2f}" if binance.price > 0 else "",
-                f"{(now - binance.received_at):.2f}" if binance.received_at > 0 else "",
                 f"{coinbase.price:.2f}" if coinbase.price > 0 else "",
                 f"{(now - coinbase.received_at):.2f}" if coinbase.received_at > 0 else "",
                 f"{kraken.price:.2f}" if kraken.price > 0 else "",
                 f"{(now - kraken.received_at):.2f}" if kraken.received_at > 0 else "",
+                f"{bitstamp.price:.2f}" if bitstamp.price > 0 else "",
+                f"{(now - bitstamp.received_at):.2f}" if bitstamp.received_at > 0 else "",
                 f"{mean_p:.2f}" if mean_p > 0 else "",
                 f"{median_p:.2f}" if median_p > 0 else "",
                 f"{spread:.2f}" if mean_p > 0 else "",
@@ -178,10 +176,6 @@ async def main() -> None:
             print(f"  Samples logged:  {csv_writes:>6,}")
             print(f"  3-feed spread:   avg ${avg_spread:>6.2f}  max ${max_spread:>6.2f}")
             print()
-            print(f"  NOTE: if Binance.US shows [OFF] persistently from a")
-            print(f"        UK/EU IP, it may be geo-blocked. Fallback options:")
-            print(f"        Coinbase + Kraken alone, or Binance.com BTCUSDC.")
-            print()
             print(f"  CSV: {CSV_PATH}")
             print(f"  Press Ctrl+C to stop")
             print("=" * 67)
@@ -198,17 +192,17 @@ async def main() -> None:
         sys.stdout.flush()
         print("\n\nShutting down feeds...")
         try:
-            await binance.stop()
             await coinbase.stop()
             await kraken.stop()
+            await bitstamp.stop()
         except Exception:
             pass
 
-        for task in (binance_task, coinbase_task, kraken_task):
+        for task in (coinbase_task, kraken_task, bitstamp_task):
             task.cancel()
         try:
             await asyncio.gather(
-                binance_task, coinbase_task, kraken_task,
+                coinbase_task, kraken_task, bitstamp_task,
                 return_exceptions=True,
             )
         except Exception:
