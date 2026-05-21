@@ -75,6 +75,8 @@ async def main() -> None:
         "coinbase_price", "coinbase_age_s",
         "kraken_price", "kraken_age_s",
         "mean_3", "median_3", "spread_3", "n_feeds_active",
+        # USD-native subset (Coinbase + Kraken only)
+        "usd_native_mean", "usd_native_spread", "usdt_basis_vs_3",
     ])
 
     samples = 0
@@ -118,6 +120,28 @@ async def main() -> None:
             else:
                 mean_p = median_p = spread = 0.0
 
+            # USD-native subset (Coinbase + Kraken). Binance is BTC/USDT
+            # which carries USDT-USD basis distortion (~$10-30 typical),
+            # so this subset should track Polymarket's Chainlink BTC/USD
+            # reference more closely.
+            usd_prices = []
+            if coinbase.price > 0 and (now - coinbase.received_at) < 10:
+                usd_prices.append(coinbase.price)
+            if kraken.price > 0 and (now - kraken.received_at) < 10:
+                usd_prices.append(kraken.price)
+            if len(usd_prices) >= 2:
+                usd_mean = sum(usd_prices) / len(usd_prices)
+                usd_spread = max(usd_prices) - min(usd_prices)
+                # Compute basis vs all-3 (how much does Binance USDT pull up?)
+                if mean_p > 0:
+                    usdt_basis = mean_p - usd_mean
+                else:
+                    usdt_basis = 0.0
+            else:
+                usd_mean = 0.0
+                usd_spread = 0.0
+                usdt_basis = 0.0
+
             # Write CSV row every tick
             writer.writerow([
                 ts_iso,
@@ -131,6 +155,9 @@ async def main() -> None:
                 f"{median_p:.2f}" if median_p > 0 else "",
                 f"{spread:.2f}" if mean_p > 0 else "",
                 n_active,
+                f"{usd_mean:.2f}" if usd_mean > 0 else "",
+                f"{usd_spread:.2f}" if usd_mean > 0 else "",
+                f"{usdt_basis:.2f}" if usd_mean > 0 and mean_p > 0 else "",
             ])
             csv_writes += 1
 
@@ -152,7 +179,7 @@ async def main() -> None:
                 print(f"  {status} {name}:  {fmt_price(p)}   ({fmt_age(age)})")
 
             print()
-            print("  -----  AGGREGATE (equal weights)  -----")
+            print("  -----  ALL 3 (Binance USDT + Coinbase USD + Kraken USD)  -----")
             if n_active >= 2:
                 print(f"  Mean of {n_active}:    {fmt_price(mean_p)}")
                 print(f"  Median:       {fmt_price(median_p)}")
@@ -161,15 +188,24 @@ async def main() -> None:
                 print(f"  Only {n_active} feed(s) active - need >=2 to aggregate")
 
             print()
+            print("  -----  USD-NATIVE ONLY (Coinbase + Kraken)  -----")
+            if usd_mean > 0:
+                print(f"  Mean:         {fmt_price(usd_mean)}")
+                print(f"  Inter-spread: {fmt_price(usd_spread)}")
+                basis_sign = "+" if usdt_basis >= 0 else ""
+                print(f"  USDT basis:   {basis_sign}{usdt_basis:.2f}   (all-3 minus USD-native)")
+                print(f"                ^ if Binance USDT pulls aggregate up, this is +ve")
+            else:
+                print(f"  Need both Coinbase and Kraken connected")
+
+            print()
             print("  -----  COMPARE TO POLYMARKET UI  -----")
             print(f"  Target: gap < $20 sustained vs Polymarket displayed price")
-            print(f"  Tip: take 5+ screenshots of Polymarket UI over an hour")
-            print(f"       and cross-reference with the CSV by timestamp")
+            print(f"  Watch: USD-native should track Polymarket much more closely")
+            print(f"         If it does -> drop Binance from prod oracle")
             print()
             print(f"  Samples logged:  {csv_writes:>6,}")
-            print(f"  Avg spread:      ${avg_spread:>6.2f}")
-            print(f"  Median spread:   ${med_spread:>6.2f}")
-            print(f"  Max spread:      ${max_spread:>6.2f}")
+            print(f"  3-feed spread:   avg ${avg_spread:>6.2f}  max ${max_spread:>6.2f}")
             print()
             print(f"  CSV: {CSV_PATH}")
             print(f"  Press Ctrl+C to stop")
