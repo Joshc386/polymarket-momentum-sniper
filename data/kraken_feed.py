@@ -21,10 +21,23 @@ KRAKEN_WS = "wss://ws.kraken.com/v2"
 
 
 class KrakenFeed:
-    """Real-time BTC/USD price from Kraken Exchange (WebSocket v2)."""
+    """Real-time BTC/USD price from Kraken Exchange (WebSocket v2).
+
+    Subscribes with `event_trigger: bbo` so updates fire on every change
+    in the best bid/offer, not just on completed trades. Kraken BTC/USD
+    trades infrequently relative to high-volume venues, so the default
+    trade-only trigger produces slow (5-10s) updates that lag far behind
+    Binance/Coinbase. The bbo trigger pushes updates many times per second.
+
+    `self.price` is the bid/ask midpoint when both sides are available
+    (most responsive), falling back to the last trade price if not.
+    `self.last_trade_price` is exposed separately for callers that want
+    the trade-print value specifically.
+    """
 
     def __init__(self):
-        self.price: float = 0.0           # Last trade price
+        self.price: float = 0.0           # Mid (preferred) or last trade
+        self.last_trade_price: float = 0.0
         self.bid: float = 0.0
         self.ask: float = 0.0
         self.price_time: float = 0.0      # Exchange-side timestamp
@@ -46,12 +59,17 @@ class KrakenFeed:
         while self._running:
             try:
                 async with websockets.connect(KRAKEN_WS, ping_interval=20) as ws:
-                    # Subscribe to BTC/USD ticker
+                    # Subscribe to BTC/USD ticker with bbo event trigger.
+                    # Default is "trades" which only updates on completed
+                    # trades — BTC/USD trades infrequently on Kraken so
+                    # this produces slow (5-10s) updates. bbo updates on
+                    # every best-bid-offer change for sub-second freshness.
                     sub_msg = json.dumps({
                         "method": "subscribe",
                         "params": {
                             "channel": "ticker",
                             "symbol": ["BTC/USD"],
+                            "event_trigger": "bbo",
                         },
                     })
                     await ws.send(sub_msg)
@@ -92,18 +110,17 @@ class KrakenFeed:
         ticks = data.get("data", [])
         if not isinstance(ticks, list):
             return
+
+        any_update = False
         for tick in ticks:
             if tick.get("symbol") != "BTC/USD":
                 continue
+            any_update = True
+
             last = tick.get("last")
             if last is not None:
                 try:
-                    self.price = float(last)
-                    self.price_time = recv_at  # Kraken doesn't include trade ts in ticker
-                    self.received_at = recv_at
-                    self._price_history.append((recv_at, self.price))
-                    if len(self._price_history) > self._max_history:
-                        self._price_history = self._price_history[-self._max_history:]
+                    self.last_trade_price = float(last)
                 except (TypeError, ValueError):
                     pass
             bid = tick.get("bid")
@@ -118,6 +135,24 @@ class KrakenFeed:
                     self.ask = float(ask)
                 except (TypeError, ValueError):
                     pass
+
+        if not any_update:
+            return
+
+        # Canonical `price` = midpoint when both sides available, else last trade.
+        # Midpoint is more responsive: updates every bbo change rather than
+        # only on completed trades.
+        if self.bid > 0 and self.ask > 0:
+            self.price = (self.bid + self.ask) / 2.0
+        elif self.last_trade_price > 0:
+            self.price = self.last_trade_price
+
+        if self.price > 0:
+            self.price_time = recv_at  # Kraken ticker doesn't include trade ts
+            self.received_at = recv_at
+            self._price_history.append((recv_at, self.price))
+            if len(self._price_history) > self._max_history:
+                self._price_history = self._price_history[-self._max_history:]
 
     async def stop(self):
         self._running = False
