@@ -59,10 +59,10 @@ class HealthMonitor:
                 stale_threshold_sec=10.0,
                 is_critical=True,
             ),
-            "oracle": FeedHealth(
-                name="Chainlink Oracle",
-                stale_threshold_sec=30.0,  # Oracle polls less frequently
-                is_critical=True,
+            "aggregated_price": FeedHealth(
+                name="Aggregated BTC (Coinbase+Kraken+Bitstamp)",
+                stale_threshold_sec=15.0,
+                is_critical=True,   # bot's reference price — bot can't trade without it
             ),
             "coinbase": FeedHealth(
                 name="Coinbase",

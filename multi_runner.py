@@ -45,6 +45,9 @@ from data.coinglass_scraper import CoinGlassScraper
 from data.coinbase_feed import CoinbaseFeed
 from data.coinalyze_feed import CoinalyzeFeed
 from data.binance_liquidations import BinanceLiquidationFeed
+from data.kraken_feed import KrakenFeed
+from data.bitstamp_feed import BitstampFeed
+from data.price_aggregator import PriceAggregator
 from notifications.telegram import TelegramNotifier
 from strategies.registry import create_bot
 from tools.latency_logger import LatencyLogger
@@ -86,17 +89,20 @@ async def detect_resolution(
     market_discovery: MarketDiscovery,
     slug: str,
     oracle: PolymarketOracle,
+    price_aggregator=None,
 ) -> str:
     """Determine market resolution — preferring actual Polymarket result.
 
     First tries the authoritative source: Polymarket's own resolution
-    from the Gamma API (outcomePrices). Falls back to oracle price
-    comparison only if the API resolution is unavailable.
+    from the Gamma API (outcomePrices). Falls back to comparing the
+    bot's reference price (3-feed aggregated) vs the PolyBackTest
+    window-open snapshot only if the API resolution is unavailable.
 
     Args:
         market_discovery: MarketDiscovery instance for API lookups.
         slug: Slug of the market to resolve.
-        oracle: PolymarketOracle as fallback for price comparison.
+        oracle: PolymarketOracle (used for window_open_price).
+        price_aggregator: PriceAggregator for the live BTC reference price.
 
     Returns:
         'UP' or 'DOWN'.
@@ -107,13 +113,18 @@ async def detect_resolution(
         logger.info(f"Resolution from Polymarket API: {resolution}")
         return resolution
 
-    # Fallback: oracle price comparison (may not match exact resolution)
+    # Fallback: live aggregated price vs window-open snapshot.
+    # (oracle.price was the old 2-feed avg; superseded by aggregated_price
+    # which uses 3 USD-native feeds.)
     logger.warning(
         f"Market {slug} resolution unknown from API — "
-        f"falling back to oracle price comparison"
+        f"falling back to aggregated price comparison"
     )
-    await oracle.fetch_once()
-    if oracle.price >= oracle.window_open_price:
+    fallback_price = (
+        price_aggregator.price if price_aggregator and price_aggregator.price > 0
+        else 0.0
+    )
+    if fallback_price >= oracle.window_open_price:
         return "UP"
     return "DOWN"
 
@@ -127,9 +138,16 @@ async def main() -> None:
     Path("data_runtime").mkdir(exist_ok=True)
 
     # ── Shared data feeds ─────────────────────────────────────────────
-    binance = BinanceFeed()
+    binance = BinanceFeed()  # still required for L2 momentum + L7 taker + liqs
     oracle = PolymarketOracle()
     coinbase = CoinbaseFeed()
+    kraken = KrakenFeed()
+    bitstamp = BitstampFeed()
+    # PriceAggregator wraps the 3 USD-native feeds — exposes .price as
+    # mean-of-healthy and is drop-in for binance.price as the BTC reference
+    # price (used by L1, L3, risk stops, trade logging, TUI). Binance keeps
+    # streaming for its other roles (candles, taker ratio, liquidations).
+    price_aggregator = PriceAggregator(coinbase, kraken, bitstamp)
     health = HealthMonitor()
 
     # Polymarket client (for orderbook + market discovery)
@@ -271,6 +289,8 @@ async def main() -> None:
     binance_task = asyncio.create_task(binance.start())
     oracle_task = asyncio.create_task(oracle.start())  # Price fed from Binance/Coinbase average
     coinbase_task = asyncio.create_task(coinbase.start())
+    kraken_task = asyncio.create_task(kraken.start())
+    bitstamp_task = asyncio.create_task(bitstamp.start())
     coinglass_task = asyncio.create_task(
         coinglass.start(current_price_getter=lambda: binance.price)
     )
@@ -337,17 +357,16 @@ async def main() -> None:
                         logger.debug(f"Orderbook REST fallback: {e}")
                     last_orderbook_refresh = now
 
-            # ── Oracle price (Binance/Coinbase average) ─────────────
-            oracle.update_price(
-                binance_price=binance.price,
-                coinbase_price=coinbase.price if coinbase.is_connected else 0.0,
-            )
+            # NOTE: oracle.update_price() removed — the 2-feed (Binance/Coinbase)
+            # average was a worse proxy for the same thing aggregated_price now
+            # provides via 3-feed USD-native mean. oracle.window_open_price still
+            # populated separately via the PolyBackTest API (different code path).
 
             # ── Health monitor ────────────────────────────────────────
             if binance.price > 0:
                 health.update_feed("binance")
-            if oracle.price > 0:
-                health.update_feed("oracle")
+            if price_aggregator.n_healthy_feeds > 0:
+                health.update_feed("aggregated_price")
             if coinbase.is_connected:
                 health.update_feed("coinbase")
             if ws_feed.last_summary or orderbook_mgr.last_summary:
@@ -378,6 +397,7 @@ async def main() -> None:
                 market=mkt,
                 health=health,
                 clob_trade_flow=ws_feed.trade_flow if ws_feed.is_fresh else None,
+                price_aggregator=price_aggregator,
             )
 
             # ── Latency logging (every tick) ─────────────────────────
@@ -413,8 +433,11 @@ async def main() -> None:
                     # Set exchange avg immediately, poll PolyBackTest in background
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
-                    window_high_price = oracle.price
-                    window_low_price = oracle.price
+                    # Track window high/low from the bot's actual reference
+                    # price (3-feed aggregated). oracle.price is no longer
+                    # maintained as of 2026-05-21.
+                    window_high_price = price_aggregator.price
+                    window_low_price = price_aggregator.price
 
                     # Tell all bots about the window but mark it as startup
                     for bot in bots:
@@ -425,7 +448,7 @@ async def main() -> None:
                 else:
                     # ── Resolve previous window ───────────────────────
                     resolution = await detect_resolution(
-                        market_discovery, last_window_slug, oracle
+                        market_discovery, last_window_slug, oracle, price_aggregator
                     )
                     logger.info(
                         f"Window transition: {last_window_slug} -> {mkt.slug} | "
@@ -452,8 +475,11 @@ async def main() -> None:
                     # Set exchange avg immediately, poll PolyBackTest in background
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
-                    window_high_price = oracle.price
-                    window_low_price = oracle.price
+                    # Track window high/low from the bot's actual reference
+                    # price (3-feed aggregated). oracle.price is no longer
+                    # maintained as of 2026-05-21.
+                    window_high_price = price_aggregator.price
+                    window_low_price = price_aggregator.price
 
                     # Rebuild snapshot with updated oracle window open price
                     ob_source = ws_feed if ws_feed.is_fresh else orderbook_mgr
@@ -467,6 +493,7 @@ async def main() -> None:
                         orderbook_mgr=ob_source,
                         market=mkt,
                         health=health,
+                        price_aggregator=price_aggregator,
                     )
 
                     for bot in bots:
@@ -488,7 +515,7 @@ async def main() -> None:
                                 f"window end ({pending_age:.0f}s)"
                             )
                             resolution = await detect_resolution(
-                                market_discovery, last_window_slug, oracle
+                                market_discovery, last_window_slug, oracle, price_aggregator
                             )
                             bot.on_window_end(resolution)
             elif mkt:
@@ -502,7 +529,7 @@ async def main() -> None:
                                 f"after {pending_age:.0f}s"
                             )
                             resolution = await detect_resolution(
-                                market_discovery, last_window_slug, oracle
+                                market_discovery, last_window_slug, oracle, price_aggregator
                             )
                             bot.on_window_end(resolution)
 
@@ -513,11 +540,14 @@ async def main() -> None:
                 window_open_price = oracle.window_open_price
 
             # ── Update window high/low ────────────────────────────────
-            if oracle.price > 0 and window_open_price > 0:
-                if oracle.price > window_high_price:
-                    window_high_price = oracle.price
-                if oracle.price < window_low_price:
-                    window_low_price = oracle.price
+            # Use aggregated price (what the bot trades on), not the dead
+            # oracle.price proxy.
+            agg_price = price_aggregator.price
+            if agg_price > 0 and window_open_price > 0:
+                if agg_price > window_high_price:
+                    window_high_price = agg_price
+                if agg_price < window_low_price:
+                    window_low_price = agg_price
 
             # ── Tick all bots ─────────────────────────────────────────
             # Don't tick on the startup window — we may have joined mid-progress
@@ -554,7 +584,6 @@ async def main() -> None:
                 render_multi_dashboard(
                     bot_states=bot_states,
                     binance_price=binance.price,
-                    oracle_price=oracle.price,
                     coinbase_price=coinbase.price if coinbase.is_connected else 0.0,
                     market_question=mkt.question if mkt else "",
                     seconds_remaining=mkt.seconds_remaining if mkt else 0.0,
@@ -568,6 +597,8 @@ async def main() -> None:
                     ws_connected=ws_feed.is_connected,
                     ws_updates=ws_feed.updates_received,
                     ws_last_update=ws_feed.last_update_time,
+                    aggregated_price=price_aggregator.price,
+                    aggregated_n_feeds=price_aggregator.n_healthy_feeds,
                 )
             except Exception as e:
                 logger.warning(f"Dashboard render error (non-fatal): {e}")
@@ -590,7 +621,7 @@ async def main() -> None:
         if last_window_slug:
             try:
                 resolution = await detect_resolution(
-                    market_discovery, last_window_slug, oracle
+                    market_discovery, last_window_slug, oracle, price_aggregator
                 )
                 for bot in bots:
                     try:
@@ -635,6 +666,8 @@ async def main() -> None:
         await binance.stop()
         await oracle.stop()
         await coinbase.stop()
+        await kraken.stop()
+        await bitstamp.stop()
         await coinglass.stop()
         await coinalyze.stop()
         await binance_liqs.stop()
@@ -647,6 +680,8 @@ async def main() -> None:
         binance_task.cancel()
         oracle_task.cancel()
         coinbase_task.cancel()
+        kraken_task.cancel()
+        bitstamp_task.cancel()
         coinglass_task.cancel()
         coinalyze_task.cancel()
         binance_liq_task.cancel()
@@ -657,6 +692,7 @@ async def main() -> None:
             wf_monitor_task.cancel()
 
         _cleanup_tasks = [binance_task, oracle_task, coinbase_task,
+                          kraken_task, bitstamp_task,
                           coinglass_task, coinalyze_task, binance_liq_task,
                           ws_feed_task]
         if sm_monitor_task:

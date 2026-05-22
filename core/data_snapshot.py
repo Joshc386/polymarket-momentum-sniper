@@ -29,6 +29,15 @@ class DataSnapshot:
     binance_candles: tuple = ()          # tuple of Candle (immutable copy)
     binance_current_candle: Any = None   # Candle | None
 
+    # ── Aggregated BTC reference price (Coinbase + Kraken + Bitstamp) ──
+    # Mean of healthy USD-native feeds. Drop-in replacement for binance_price
+    # at the "BTC reference price" call sites (L1 oracle_lag, L3 liquidation
+    # distance, risk stops, trade logging, TUI). Binance keeps its slot
+    # above because L2 momentum + L7 taker + liquidations still need it.
+    aggregated_price: float = 0.0
+    aggregated_received_at: float = 0.0
+    aggregated_n_feeds: int = 0          # How many of the 3 USD-native feeds are healthy
+
     # ── Chainlink Oracle ──
     oracle_price: float = 0.0
     oracle_window_open_price: float = 0.0
@@ -81,6 +90,7 @@ def build_snapshot(
     market,
     health,
     clob_trade_flow=None,
+    price_aggregator=None,
 ) -> DataSnapshot:
     """Build an immutable snapshot from live feed objects.
 
@@ -108,6 +118,14 @@ def build_snapshot(
         binance_received_at=getattr(binance, "received_at", 0.0),
         binance_candles=tuple(binance.candles),
         binance_current_candle=binance.current_candle,
+        # Aggregated BTC reference price (3-feed USD-native mean)
+        aggregated_price=(price_aggregator.price if price_aggregator else 0.0),
+        aggregated_received_at=(
+            price_aggregator.received_at if price_aggregator else 0.0
+        ),
+        aggregated_n_feeds=(
+            price_aggregator.n_healthy_feeds if price_aggregator else 0
+        ),
         # Oracle
         oracle_price=oracle.price,
         oracle_window_open_price=oracle.window_open_price,

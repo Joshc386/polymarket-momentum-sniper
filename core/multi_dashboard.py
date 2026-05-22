@@ -29,7 +29,6 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 def render_multi_dashboard(
     bot_states: list[dict[str, Any]],
     binance_price: float,
-    oracle_price: float,
     coinbase_price: float,
     market_question: str,
     seconds_remaining: float,
@@ -43,22 +42,25 @@ def render_multi_dashboard(
     ws_updates: int = 0,
     ws_last_update: float = 0.0,
     window_open_source: str = "",
+    aggregated_price: float = 0.0,
+    aggregated_n_feeds: int = 0,
 ) -> None:
     """Render the multi-bot dashboard to the terminal.
 
     Args:
         bot_states: List of dicts from each bot's get_dashboard_state().
-        binance_price: Current Binance BTC price.
-        oracle_price: Current Chainlink oracle price.
+        binance_price: Current Binance BTC price (fallback display only).
         coinbase_price: Current Coinbase price.
         market_question: Active market question text.
         seconds_remaining: Seconds left in current window.
         orderbook: OrderbookSummary or None.
         regime: Current regime string.
         regime_confidence: Regime confidence 0-1.
-        window_open: Oracle price at window open.
-        window_high: Highest oracle price during this window.
-        window_low: Lowest oracle price during this window.
+        window_open: Window open price (from PolyBackTest/Chainlink Data Streams).
+        window_high: Highest aggregated price during this window.
+        window_low: Lowest aggregated price during this window.
+        aggregated_price: Current 3-feed USD-native BTC price (the bot's reference).
+        aggregated_n_feeds: Number of healthy contributing feeds (1-3).
     """
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     lines: list[str] = []
@@ -69,19 +71,30 @@ def render_multi_dashboard(
     )
 
     # ── Prices ──
-    oracle_lag_pct = 0.0
-    if oracle_price > 0 and binance_price > 0:
-        oracle_lag_pct = ((binance_price - oracle_price) / oracle_price) * 100
-
-    lag_color = GREEN if oracle_lag_pct > 0 else RED if oracle_lag_pct < 0 else DIM
-    price_line = (
-        f"  {now}  "
-        f"Oracle: ${oracle_price:,.2f}  "
-        f"Binance: ${binance_price:,.2f} "
-        f"({lag_color}{oracle_lag_pct:+.3f}%{RESET})"
-    )
-    if coinbase_price > 0:
-        price_line += f"  CB: ${coinbase_price:,.2f}"
+    # Aggregated 3-feed USD-native (Coinbase + Kraken + Bitstamp) is the
+    # canonical BTC reference. Oracle row removed — the old oracle.price
+    # was just a 2-feed (Binance/Coinbase) average superseded by this.
+    # The free public Chainlink on-chain feed has a 1hr heartbeat so it's
+    # not usable as a live price anyway; PolyBackTest gives us the
+    # window-open snapshot at sub-second freshness via Chainlink Data
+    # Streams, shown in the Window OHLC line below.
+    if aggregated_price > 0:
+        feed_indicator = (
+            f"{GREEN}{aggregated_n_feeds}/3{RESET}"
+            if aggregated_n_feeds == 3
+            else f"{RED}{aggregated_n_feeds}/3{RESET}"
+        )
+        price_line = (
+            f"  {now}  "
+            f"BTC ({feed_indicator}): ${aggregated_price:,.2f}"
+        )
+    else:
+        # Degraded mode — fall back to binance display
+        price_line = (
+            f"  {now}  "
+            f"{RED}BTC: AGG OFFLINE{RESET}  "
+            f"Binance(fallback): ${binance_price:,.2f}"
+        )
 
     # WS feed status
     if ws_connected:
@@ -94,7 +107,9 @@ def render_multi_dashboard(
 
     # ── Window OHLC ──
     if window_open > 0:
-        change = oracle_price - window_open
+        # "Change since window open" measured against the bot's actual
+        # reference price (aggregated), not the dead oracle.price proxy.
+        change = aggregated_price - window_open
         change_pct = (change / window_open) * 100 if window_open > 0 else 0.0
         cc = GREEN if change >= 0 else RED
         src_tag = ""

@@ -402,7 +402,18 @@ class ContrarianEvStrategy:
     def on_tick(self, snapshot: DataSnapshot) -> None:
         """Compute signals, evaluate entry, execute trade if warranted."""
         mkt = snapshot.market
-        if not mkt or not mkt.is_active or snapshot.binance_price <= 0:
+        # Use the 3-exchange USD-native aggregated price as the BTC
+        # reference (was binance_price prior to 2026-05-21). Binance is
+        # USDT-quoted on .com (~$5-15 offset vs Chainlink) which
+        # contaminated L1 with phantom lag. Aggregated mean of
+        # Coinbase + Kraken + Bitstamp tracks Chainlink within ~$5-15.
+        # Fallback to binance_price if aggregator has no healthy feeds
+        # (degraded mode — better than refusing to trade).
+        btc_ref_price = (
+            snapshot.aggregated_price if snapshot.aggregated_price > 0
+            else snapshot.binance_price
+        )
+        if not mkt or not mkt.is_active or btc_ref_price <= 0:
             self._entry_decision = EntryDecision(reason="No active market")
             return
 
@@ -410,19 +421,19 @@ class ContrarianEvStrategy:
 
         # ── Signal computation (identical to main.py) ──
         self._oracle_lag_val = self._oracle_lag.compute(
-            exchange_price=snapshot.binance_price,
+            exchange_price=btc_ref_price,
             oracle_price=snapshot.oracle_price,
             oracle_open_price=snapshot.oracle_window_open_price,
         )
         self._momentum_val = self._momentum.compute(
-            candles=snapshot.binance_candles,
+            candles=snapshot.binance_candles,        # candles stay Binance (OHLCV microstructure)
             current_candle=snapshot.binance_current_candle,
         )
         self._liquidation_val = self._liquidation.compute(
-            current_price=snapshot.binance_price,
+            current_price=btc_ref_price,
             liq_data=snapshot.coinglass_data,
             price_momentum=self._momentum_val,
-            live_stats=snapshot.binance_liq_stats,
+            live_stats=snapshot.binance_liq_stats,   # liquidations stay Binance (exchange-specific)
             coinalyze_snapshot=snapshot.coinalyze_snapshot,
         )
         self._coinbase_dir = snapshot.coinbase_direction
@@ -723,7 +734,7 @@ class ContrarianEvStrategy:
                 market_slug=mkt.slug if mkt else "",
                 secs_remaining=secs_remaining,
                 secs_into_window=300.0 - secs_remaining,
-                btc_price=snapshot.binance_price or 0.0,
+                btc_price=btc_ref_price or 0.0,
                 oracle_price=snapshot.oracle_price or 0.0,
                 oracle_open_price=snapshot.oracle_window_open_price or 0.0,
                 coinbase_price=getattr(snapshot, "coinbase_price", 0.0) or 0.0,
@@ -801,9 +812,14 @@ class ContrarianEvStrategy:
         if not trade:
             return
 
+        # Use aggregated 3-feed price for stop checks (with binance fallback)
+        btc_now = (
+            snapshot.aggregated_price if snapshot.aggregated_price > 0
+            else snapshot.binance_price
+        )
         should_stop = self._risk_mgr.should_stop_btc_distance(
             side=trade.side,
-            btc_price_now=snapshot.binance_price,
+            btc_price_now=btc_now,
             btc_open_price=snapshot.oracle_window_open_price,
             secs_remaining=secs_remaining,
         )
@@ -824,7 +840,7 @@ class ContrarianEvStrategy:
         if not exit_price or exit_price <= 0:
             return
 
-        distance = abs(snapshot.binance_price - snapshot.oracle_window_open_price)
+        distance = abs(btc_now - snapshot.oracle_window_open_price)
         logger.warning(
             "[%s] BTC distance stop: %s position, BTC moved $%.0f from "
             "open (threshold $%.0f), exiting at $%.4f with %.0fs remaining",
@@ -1080,7 +1096,12 @@ class ContrarianEvStrategy:
             market_implied_prob=ob.market_implied_prob_up,
             edge=ed.best_ev,
             time_remaining_secs=secs_remaining,
-            btc_price=snapshot.binance_price,
+            # Log the aggregated 3-feed price as btc_price_at_entry; binance
+            # fallback if aggregator is degraded so logging never breaks.
+            btc_price=(
+                snapshot.aggregated_price if snapshot.aggregated_price > 0
+                else snapshot.binance_price
+            ),
             oracle_price=snapshot.oracle_price,
             oracle_open_price=snapshot.oracle_window_open_price,
             orderbook_signal=self._ob_signal_val,
