@@ -44,6 +44,24 @@ from strategy.signal_diagnostic_log import SignalDiagnosticLogger, SignalTick
 logger = logging.getLogger(__name__)
 
 
+def l1_directional_floor_blocks(side: str, l1: float, deadband: float) -> bool:
+    """True if an entry bets against the window-open resolution line.
+
+    L1 (oracle_lag_signal) is BTC's displacement from the window-open line:
+    >0 price above the line, <0 below. A YES bet (UP) is "against the line"
+    when price is below it (L1 < 0); a NO bet (DOWN) is against when price
+    is above it (L1 > 0). The deadband is a noise band around the line
+    (price-feed jitter near zero) within which neither side is blocked.
+
+    Returns True when the entry should be skipped.
+    """
+    if side == "YES":
+        return l1 < -deadband
+    if side == "NO":
+        return l1 > deadband
+    return False
+
+
 class ContrarianEvStrategy:
     """Baseline contrarian EV strategy — buys the cheap side when model
     estimates +EV after Polymarket's 2% winner fee.
@@ -286,11 +304,21 @@ class ContrarianEvStrategy:
         self._high_ev_min_secs_into_window = filter_cfg.get(
             "high_ev_min_secs_into_window", 0.0
         )
+        # Directional L1 floor (added 2026-05-29). When enabled, skip entries
+        # that bet against the window-open resolution line beyond a deadband:
+        # YES (UP) when L1 < -deadband (price below line), NO (DOWN) when
+        # L1 > +deadband (price above). Live + independent-backtest analysis
+        # showed betting against the line is negative-EV. Default off → Bot G
+        # and Bot K unchanged. See BTC_5min_Observations 2026-05-29.
+        self._directional_l1_floor = filter_cfg.get("directional_l1_floor", False)
+        self._directional_l1_floor_deadband = filter_cfg.get(
+            "directional_l1_floor_deadband", 0.1
+        )
         self._last_orderbook = None  # stored each tick for filter access
         # Track how often each filter fires (for dashboard/diagnostics)
         self._filter_skipped = {
             "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
-            "high_ev_early": 0,
+            "high_ev_early": 0, "l1_against_line": 0,
         }
 
         # Per-tick signal diagnostic logger (off by default; enable in config
@@ -980,6 +1008,19 @@ class ContrarianEvStrategy:
             size. Prevents walking the book on thin markets. At $5 stakes
             this rarely fires; becomes important when sizing up.
         """
+        # Directional L1 floor: never bet against the window-open line
+        # (beyond the deadband). YES needs L1 >= -deadband, NO needs
+        # L1 <= +deadband. Opt-in; default off keeps Bot G/K unchanged.
+        if self._directional_l1_floor and l1_directional_floor_blocks(
+            decision.side, self._oracle_lag_val, self._directional_l1_floor_deadband
+        ):
+            self._filter_skipped["l1_against_line"] += 1
+            return (
+                f"l1_against_line: {decision.side} with L1="
+                f"{self._oracle_lag_val:+.3f} "
+                f"(deadband {self._directional_l1_floor_deadband:.2f})"
+            )
+
         if (self._yes_min_price > 0
                 and decision.side == "YES"
                 and decision.price < self._yes_min_price):

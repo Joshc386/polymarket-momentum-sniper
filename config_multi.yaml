@@ -629,6 +629,116 @@ bots:
         ranging: 1.5
         trending_up: 0.75
 
+  # -- Bot K2: Bot K + directional L1 floor (A/B test, 2026-05-29) --
+  # Byte-for-byte clone of bot_k_sm_confirmation with ONE change: the
+  # directional L1 floor enabled. Runs paper alongside Bot K to measure the
+  # floor's INCREMENTAL value on top of J13 + optimised weights (the
+  # backtest engine lacks J13, so it can't give the faithful number).
+  # Hypothesis (BTC_5min_Observations 2026-05-29 "L1 directional leak"):
+  # the bot leaks betting against the window-open resolution line — YES
+  # while L1<0 (price below line), NO while L1>0 (above). The floor blocks
+  # those entries beyond a deadband. Independent Mar-Apr backtest: flipped
+  # per-trade EV -0.0096 -> +0.0280, WR 35.6% -> 50.8%. YES side is the
+  # genuinely-incremental piece (J13 doesn't touch YES); NO mostly overlaps
+  # J13 but the floor closes its residual. Bot K config is UNCHANGED — it is
+  # the A/B baseline. Do not evaluate before ~week 2.
+  bot_k2_l1_floor:
+    strategy: contrarian_ev
+    enabled: true
+    db_path: ./data_runtime/bot_k2_l1_floor.db
+    weekend_flip: true
+
+    signal_diagnostic:
+      enabled: true
+      sample_every_n: 1
+
+    sm_confirmation:
+      enabled: false
+
+    # Same filters as Bot K, PLUS the directional L1 floor (the only change).
+    filters:
+      yes_min_price: 0.40
+      skip_regimes: [trending_down]
+      high_ev_threshold: 0.15
+      high_ev_min_secs_into_window: 60.0
+      # Directional L1 floor (2026-05-29): block entries that bet against the
+      # window-open resolution line beyond the deadband. YES needs L1>=-0.1,
+      # NO needs L1<=+0.1. Deadband 0.1 absorbs price-feed noise near zero
+      # (3-feed aggregate vs window-open ref) AND keeps the mildly-against
+      # reversion winners (profitable in mean-reverting regimes). Do NOT
+      # tighten toward 0 — that would block those winners. May widen if the
+      # floor hurts in mean-reversion. The floor is regime-conditional
+      # insurance: helps in directional regimes, can hurt in mean-reversion.
+      directional_l1_floor: true
+      directional_l1_floor_deadband: 0.1
+
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down, ranging, high_vol]
+      block_regimes: [low_vol]
+
+    signals:
+      weight_schedule: bot_k_optimised
+      use_ranging_override: false
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.195
+      taker_ratio_weight: 0.131
+      absorption_weight: 0.05
+      exhaustion_weight: 0.05
+      trade_size_weight: 0.05
+      wallet_flow_weight: 0.05
+      directional_signal_gating: true
+      gate_threshold: 0.4
+
+    entry:
+      min_edge: 0.003
+      max_edge: 0.025
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduction_enabled: false
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
+      btc_distance_stop: 100.0
+      btc_distance_min_secs_remaining: 60.0
+      drawdown_pct: 0.30
+      daily_trade_cap: 150
+      regime_size_overrides:
+        ranging: 1.5
+        trending_up: 0.75
+
   # -- Bot F: Latency Arbitrage (exploits Binance->CLOB delay) --
   # Fundamentally different from Bots A-E: no signal prediction.
   # Detects real-time Binance moves, buys stale CLOB odds, exits
