@@ -405,7 +405,7 @@ bots:
   # thresholds. Shares feeds with all other bots via multi_runner.
   bot_g_signal_aligned:
     strategy: contrarian_ev
-    enabled: true
+    enabled: false   # Decommissioned 2026-06-01 — first confirmed-edge bot, retired; Bot K is the go-live candidate. Final +$239. Historical data retained.
     db_path: ./data_runtime/bot_g_signal_aligned.db
     weekend_flip: true
 

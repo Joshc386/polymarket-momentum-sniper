@@ -49,6 +49,10 @@ class TradeRecord:
     ob_yes_depth: float = 0.0
     ob_ask_depth: float = 0.0
     session_trade_num: int = 0
+    # Full feature snapshot at entry (flat dict of all L1–L12 + sub-components,
+    # prob_edge, net_ev_per_share, secs_into_window, …). NULL-not-zero: a key
+    # whose value is None records as SQL NULL. See ADR-0001.
+    feature_snapshot: dict = field(default_factory=dict)
     # Outcome fields
     resolution: str | None = None  # "UP" or "DOWN" or None
     pnl: float | None = None
@@ -72,11 +76,23 @@ _TRADE_FIELDS = [
     "oracle_open_price",
 ]
 
+# Enriched feature-snapshot columns merged from trade.feature_snapshot at
+# insert time. Kept separate from the explicit columns above so a None value
+# records as SQL NULL (layer absent), never 0.0. See ADR-0001.
+_ENRICHED_COLUMNS = [
+    "l1_lag_component", "l1_open_component",
+    "l4_imbalance", "l4_flow", "l4_mid_dev", "l4_top_pressure", "l4_thickness",
+    "l6_fade", "l7_taker_ratio", "l8_clob_flow", "l9b_absorption",
+    "l10_exhaustion", "l11_trade_size", "l12_wallet_flow",
+    "prob_edge", "net_ev_per_share", "required_edge",
+    "secs_into_window", "schedule_override",
+]
+
 
 def _log_to_db(db, trade, is_paper: bool) -> int:
     """Insert a trade into the database. Returns row ID."""
     now_str = datetime.now(timezone.utc).isoformat()
-    return db.insert_trade(
+    params = dict(
         timestamp=now_str,
         market_id=trade.market_id,
         market_slug=trade.market_slug,
@@ -112,6 +128,14 @@ def _log_to_db(db, trade, is_paper: bool) -> int:
         ob_ask_depth=trade.ob_ask_depth,
         session_trade_num=trade.session_trade_num,
     )
+    # Merge the full feature snapshot (NULL-not-zero preserved: a None value
+    # writes as SQL NULL). Only the enriched columns are pulled in; keys that
+    # duplicate explicit columns above are ignored.
+    snap = getattr(trade, "feature_snapshot", None) or {}
+    for col in _ENRICHED_COLUMNS:
+        if col in snap:
+            params[col] = snap[col]
+    return db.insert_trade(**params)
 
 
 def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
@@ -217,6 +241,7 @@ class PaperExecutionEngine:
         ob_yes_depth: float = 0.0,
         ob_ask_depth: float = 0.0,
         session_trade_num: int = 0,
+        feature_snapshot: dict | None = None,
     ) -> TradeRecord | None:
         """Simulate placing a trade. Returns TradeRecord if 'filled'."""
         fill_price = min(price + self.slippage, 0.99)
@@ -239,6 +264,7 @@ class PaperExecutionEngine:
             consecutive_losses=consecutive_losses, signal_weights=signal_weights,
             ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
             session_trade_num=session_trade_num,
+            feature_snapshot=feature_snapshot or {},
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=True)
@@ -426,6 +452,7 @@ class LiveExecutionEngine:
         ob_yes_depth: float = 0.0,
         ob_ask_depth: float = 0.0,
         session_trade_num: int = 0,
+        feature_snapshot: dict | None = None,
     ) -> TradeRecord | None:
         """Place a real order on Polymarket.
 
@@ -474,6 +501,7 @@ class LiveExecutionEngine:
             consecutive_losses=consecutive_losses, signal_weights=signal_weights,
             ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
             session_trade_num=session_trade_num, order_id=order_id,
+            feature_snapshot=feature_snapshot or {},
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=False)

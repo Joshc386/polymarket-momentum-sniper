@@ -8,7 +8,7 @@ been running in paper trading. No modifications from the original logic.
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from core.bot_strategy import BotStrategy
@@ -29,6 +29,7 @@ from signals.trade_size import TradeSizeSignal
 from signals.wallet_flow import WalletFlowSignal
 from signals.combiner import SignalCombiner
 from strategy.entry_logic import EntryLogic, EntryDecision
+from strategy.feature_snapshot import SnapshotInputs, build_feature_snapshot
 from strategy.sizing import PositionSizer
 from strategy.risk_manager import RiskManager
 from strategy.regime_detector import RegimeDetector, Regime
@@ -700,7 +701,10 @@ class ContrarianEvStrategy:
                         reason=f"Filtered: {skip_reason}"
                     )
                 else:
-                    self._execute_trade(snapshot, ob, secs_remaining)
+                    self._execute_trade(
+                        snapshot, ob, secs_remaining,
+                        _schedule_override, btc_ref_price,
+                    )
         elif ob and not self._risk_state.can_trade:
             self._entry_decision = EntryDecision(
                 reason=f"Risk: {self._risk_state.reason}"
@@ -734,8 +738,91 @@ class ContrarianEvStrategy:
         # Used to diagnose signal bias issues. No effect on trading logic.
         if self._signal_diag is not None and ob:
             self._log_signal_diagnostic(
-                snapshot, ob, secs_remaining, _schedule_override
+                snapshot, ob, secs_remaining, _schedule_override, btc_ref_price
             )
+
+    def _collect_snapshot_inputs(
+        self,
+        snapshot: DataSnapshot,
+        ob,
+        secs_remaining: float,
+        schedule_override: str,
+        btc_ref_price: float,
+    ) -> SnapshotInputs:
+        """Map current signal state into SnapshotInputs for the shared builder.
+
+        This is the single place that reads strategy state into the feature
+        snapshot. Both the per-tick diagnostic log and the per-trade record
+        build from the result, so the two stores cannot drift apart. Presence
+        flags drive the builder's NULL-not-zero active detection.
+        """
+        weights = self._current_weights or (0.0, 0.0, 0.0, 0.0, 0.0)
+        side = "YES" if self._est_prob_up >= 0.5 else "NO"
+        if ob is None:
+            entry_price = 0.5
+        elif side == "YES":
+            entry_price = getattr(ob, "yes_best_ask", 0.5)
+        else:
+            no_ask = getattr(ob, "no_best_ask", None)
+            entry_price = (
+                no_ask if no_ask is not None
+                else 1.0 - getattr(ob, "yes_best_bid", 0.5)
+            )
+        mkt_mid_yes = (
+            (ob.yes_best_bid + ob.yes_best_ask) / 2.0 if ob is not None else 0.5
+        )
+        coinalyze = getattr(snapshot, "coinalyze_snapshot", None)
+        return SnapshotInputs(
+            side=side,
+            entry_price=entry_price,
+            est_prob_up=self._est_prob_up,
+            market_prob_up=mkt_mid_yes,
+            btc_price=btc_ref_price or 0.0,
+            oracle_price=getattr(snapshot, "oracle_price", 0.0) or 0.0,
+            oracle_open_price=getattr(snapshot, "oracle_window_open_price", 0.0) or 0.0,
+            secs_remaining=secs_remaining,
+            regime=(
+                self._current_regime.regime.value if self._current_regime else ""
+            ),
+            schedule_override=schedule_override or "",
+            required_edge=(
+                self._entry_decision.required_edge if self._entry_decision else 0.0
+            ),
+            weights={
+                "L1": weights[0], "L2": weights[1], "L3": weights[2],
+                "L4": weights[3], "L5": weights[4],
+            },
+            l1_oracle_lag=self._oracle_lag_val,
+            l1_lag_component=getattr(self._oracle_lag, "last_lag_component", 0.0),
+            l1_open_component=getattr(self._oracle_lag, "last_open_component", 0.0),
+            l2_momentum=self._momentum_val,
+            l3_liquidation=self._liquidation_val,
+            l4_orderbook=self._ob_signal_val,
+            l4_imbalance=getattr(self._orderbook, "last_imbalance", 0.0),
+            l4_flow=getattr(self._orderbook, "last_flow", 0.0),
+            l4_mid_dev=getattr(self._orderbook, "last_mid_dev", 0.0),
+            l4_top_pressure=getattr(self._orderbook, "last_top_pressure", 0.0),
+            l4_thickness=getattr(self._orderbook, "last_thickness", 0.0),
+            l5_sentiment=self._sentiment_val,
+            l6_fade=self._fade_signal_val,
+            l7_taker_ratio=self._taker_ratio_val,
+            l8_clob_flow=self._clob_flow_val,
+            l9b_absorption=self._absorption_val,
+            l10_exhaustion=self._exhaustion_val,
+            l11_trade_size=self._trade_size_val,
+            l12_wallet_flow=self._wallet_flow_val,
+            combined_signal=self._combined_signal,
+            coinbase_direction=self._coinbase_dir,
+            has_orderbook=ob is not None,
+            yes_bid_depth=getattr(ob, "yes_bid_depth", 0.0) if ob is not None else 0.0,
+            has_coinalyze=bool(coinalyze and getattr(coinalyze, "is_valid", False)),
+            has_clob_flow=getattr(snapshot, "clob_trade_flow", None) is not None,
+            has_wallet_monitor=self._cfg.get("_wallet_flow_monitor") is not None,
+            absorption_on=self._absorption is not None,
+            exhaustion_on=self._exhaustion is not None,
+            trade_size_on=self._trade_size is not None,
+            wallet_flow_on=self._wallet_flow is not None,
+        )
 
     def _log_signal_diagnostic(
         self,
@@ -743,84 +830,78 @@ class ContrarianEvStrategy:
         ob,
         secs_remaining: float,
         schedule_override: str,
+        btc_ref_price: float,
     ) -> None:
-        """Write one row to the signal diagnostic DB. Best-effort, non-fatal."""
+        """Write one row to the signal diagnostic DB. Best-effort, non-fatal.
+
+        Shares the feature-snapshot builder with the per-trade record so the
+        two stores cannot drift apart. Diag-only fields (would_enter, filter
+        and risk gating, market identifiers) are layered on top of the shared
+        snapshot. A logging failure never propagates into the trading loop.
+        """
         try:
+            snap = build_feature_snapshot(
+                self._collect_snapshot_inputs(
+                    snapshot, ob, secs_remaining, schedule_override, btc_ref_price
+                )
+            )
             mkt = snapshot.market
             decision = self._entry_decision
-            # market_implied_prob from midpoint
-            mkt_mid_yes = (ob.yes_best_bid + ob.yes_best_ask) / 2.0 if ob else 0.5
-
-            # Determine "would_pick_side" mirroring entry_logic.signal_aligned
-            if self._est_prob_up >= 0.5:
-                would_side = "YES"
-            else:
-                would_side = "NO"
-
+            weights = self._current_weights or (0.0, 0.0, 0.0, 0.0, 0.0)
+            reason = (decision.reason or "") if decision else ""
             tick = SignalTick(
                 market_id=mkt.condition_id if mkt else "",
                 market_slug=mkt.slug if mkt else "",
-                secs_remaining=secs_remaining,
-                secs_into_window=300.0 - secs_remaining,
-                btc_price=btc_ref_price or 0.0,
-                oracle_price=snapshot.oracle_price or 0.0,
-                oracle_open_price=snapshot.oracle_window_open_price or 0.0,
+                secs_remaining=snap["secs_remaining"],
+                secs_into_window=snap["secs_into_window"],
+                btc_price=snap["btc_price"],
+                oracle_price=snap["oracle_price"],
+                oracle_open_price=snap["oracle_open_price"],
                 coinbase_price=getattr(snapshot, "coinbase_price", 0.0) or 0.0,
-                regime=(
-                    self._current_regime.regime.value
-                    if self._current_regime else ""
-                ),
-                schedule_override=schedule_override or "",
-                # Core L1-L5
-                l1_oracle_lag=self._oracle_lag_val,
-                l2_momentum=self._momentum_val,
-                l3_liquidation=self._liquidation_val,
-                l4_orderbook=self._ob_signal_val,
-                l5_sentiment=self._sentiment_val,
-                # L1 sub-components (exposed by oracle_lag.py)
-                l1_lag_component=getattr(self._oracle_lag, "last_lag_component", 0.0),
-                l1_open_component=getattr(self._oracle_lag, "last_open_component", 0.0),
-                # L4 sub-components (exposed by orderbook_signal.py)
-                l4_imbalance=getattr(self._orderbook, "last_imbalance", 0.0),
-                l4_flow=getattr(self._orderbook, "last_flow", 0.0),
-                l4_mid_dev=getattr(self._orderbook, "last_mid_dev", 0.0),
-                l4_top_pressure=getattr(self._orderbook, "last_top_pressure", 0.0),
-                l4_thickness=getattr(self._orderbook, "last_thickness", 0.0),
-                # Additive signals
-                l6_fade=self._fade_signal_val,
-                l7_taker_ratio=self._taker_ratio_val,
-                l8_clob_flow=self._clob_flow_val,
-                l9b_absorption=self._absorption_val,
-                l10_exhaustion=self._exhaustion_val,
-                l11_trade_size=self._trade_size_val,
-                l12_wallet_flow=self._wallet_flow_val,
-                # Cross-exchange and combination
-                coinbase_direction=self._coinbase_dir,
-                combined_signal=self._combined_signal,
-                est_prob_up=self._est_prob_up,
-                market_implied_prob=mkt_mid_yes,
-                prob_edge=decision.prob_edge if decision else 0.0,
-                required_edge=decision.required_edge if decision else 0.0,
-                # Weights actually used
-                w_oracle=self._current_weights[0] if self._current_weights else 0.0,
-                w_momentum=self._current_weights[1] if self._current_weights else 0.0,
-                w_liquidation=self._current_weights[2] if self._current_weights else 0.0,
-                w_orderbook=self._current_weights[3] if self._current_weights else 0.0,
-                w_sentiment=self._current_weights[4] if self._current_weights else 0.0,
-                # Entry decision
-                would_pick_side=would_side,
+                regime=snap["regime"],
+                schedule_override=snap["schedule_override"],
+                l1_oracle_lag=snap["l1_oracle_lag"],
+                l2_momentum=snap["l2_momentum"],
+                l3_liquidation=snap["l3_liquidation"],
+                l4_orderbook=snap["l4_orderbook"],
+                l5_sentiment=snap["l5_sentiment"],
+                l1_lag_component=snap["l1_lag_component"],
+                l1_open_component=snap["l1_open_component"],
+                l4_imbalance=snap["l4_imbalance"],
+                l4_flow=snap["l4_flow"],
+                l4_mid_dev=snap["l4_mid_dev"],
+                l4_top_pressure=snap["l4_top_pressure"],
+                l4_thickness=snap["l4_thickness"],
+                l6_fade=snap["l6_fade"],
+                l7_taker_ratio=snap["l7_taker_ratio"],
+                l8_clob_flow=snap["l8_clob_flow"],
+                l9b_absorption=snap["l9b_absorption"],
+                l10_exhaustion=snap["l10_exhaustion"],
+                l11_trade_size=snap["l11_trade_size"],
+                l12_wallet_flow=snap["l12_wallet_flow"],
+                coinbase_direction=snap["coinbase_direction"],
+                combined_signal=snap["combined_signal"],
+                est_prob_up=snap["est_prob_up"],
+                market_implied_prob=snap["market_implied_prob"],
+                prob_edge=snap["prob_edge"],
+                required_edge=snap["required_edge"],
+                w_oracle=weights[0], w_momentum=weights[1],
+                w_liquidation=weights[2], w_orderbook=weights[3],
+                w_sentiment=weights[4],
+                would_pick_side=snap["side"],
                 would_enter=1 if (decision and decision.should_enter) else 0,
-                entry_reason=decision.reason if decision else "",
-                # Filter/risk
-                filter_blocked=(
-                    decision.reason if decision and decision.reason.startswith("Filtered:")
-                    else ""
+                entry_reason=reason,
+                filter_blocked=reason if reason.startswith("Filtered:") else "",
+                risk_can_trade=(
+                    1 if (self._risk_state and self._risk_state.can_trade) else 0
                 ),
-                risk_can_trade=1 if self._risk_state.can_trade else 0,
-                risk_reason=self._risk_state.reason or "",
-                trade_placed=1 if (decision and decision.should_enter and
-                                    not (decision.reason or "").startswith("Filtered:"))
-                              else 0,
+                risk_reason=(
+                    (self._risk_state.reason or "") if self._risk_state else ""
+                ),
+                trade_placed=1 if (
+                    decision and decision.should_enter
+                    and not reason.startswith("Filtered:")
+                ) else 0,
             )
             self._signal_diag.log(tick)
         except Exception as e:
@@ -1079,7 +1160,8 @@ class ContrarianEvStrategy:
         return ""
 
     def _execute_trade(
-        self, snapshot: DataSnapshot, ob, secs_remaining: float
+        self, snapshot: DataSnapshot, ob, secs_remaining: float,
+        schedule_override: str = "", btc_ref_price: float = 0.0,
     ) -> None:
         """Place a paper trade using the current entry decision."""
         ed = self._entry_decision
@@ -1122,6 +1204,20 @@ class ContrarianEvStrategy:
             "L5": self._current_weights[4],
         })
 
+        # Full feature snapshot at entry — one self-contained labelled example.
+        # Override side/entry_price with the ACTUAL trade (the collected inputs
+        # otherwise reflect the would-be entry from est_prob_up/orderbook).
+        feature_snapshot = build_feature_snapshot(
+            replace(
+                self._collect_snapshot_inputs(
+                    snapshot, ob, secs_remaining,
+                    schedule_override, btc_ref_price,
+                ),
+                side=ed.side,
+                entry_price=ed.price,
+            )
+        )
+
         mkt = snapshot.market
         trade = self._executor.execute_trade(
             side=ed.side,
@@ -1163,6 +1259,7 @@ class ContrarianEvStrategy:
             ob_yes_depth=ob.yes_bid_depth if ob else 0.0,
             ob_ask_depth=ob.yes_ask_depth if ob else 0.0,
             session_trade_num=self._executor.total_trades + 1,
+            feature_snapshot=feature_snapshot,
         )
 
         if trade:
