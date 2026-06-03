@@ -10,17 +10,28 @@ Design notes (see docs/adr/0001-full-feature-snapshot-on-trade-record.md):
 - NULL-not-zero: a layer value is emitted only when the layer genuinely
   computed on that tick (object present AND its data guard satisfied);
   otherwise None. `0.0` means "computed, genuinely neutral", never "absent".
-- EV uses the Polymarket-doc fee `0.072*p*(1-p)`, NOT the 2% winner-fee the
-  live `best_ev`/gate uses. This is a logging value only; it does not feed
-  any entry/sizing decision.
+- EV uses the Polymarket-doc fee `0.07*p*(1-p)` (taker fee, charged at entry
+  on every trade), NOT the 2% winner-fee the live `best_ev`/gate still uses.
+  This is a logging value only; it does not feed any entry/sizing decision.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Polymarket crypto-market fee per share, charged at entry.
-FEE_RATE = 0.072
+# Polymarket crypto-market taker fee rate, charged at entry on every trade.
+FEE_RATE = 0.07
+
+
+def fee_per_share(price: float) -> float:
+    """Polymarket crypto taker fee per contract: FEE_RATE * p * (1 - p).
+
+    Charged once at entry, on every trade regardless of outcome. Peaks at
+    p = 0.50 (FEE_RATE * 0.25). Multiply by the number of contracts (shares)
+    for the total position fee. Single source of truth for the fee formula —
+    reused by the EV logging here and the PnL resolvers in core/execution.py.
+    """
+    return FEE_RATE * price * (1.0 - price)
 
 
 @dataclass(frozen=True)
@@ -87,7 +98,7 @@ def _net_ev_per_share(side: str, entry_price: float, est_prob_up: float) -> floa
     """
     q = est_prob_up if side == "YES" else (1.0 - est_prob_up)
     p = entry_price
-    return (q - p) - FEE_RATE * p * (1.0 - p)
+    return (q - p) - fee_per_share(p)
 
 
 def _gated(value: float, active: bool) -> float | None:

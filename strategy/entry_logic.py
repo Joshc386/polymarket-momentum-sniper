@@ -1,6 +1,8 @@
 import logging
 from dataclasses import dataclass
 
+from strategy.feature_snapshot import fee_per_share
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,9 @@ class EntryLogic:
     ):
         self.min_edge = min_edge
         self.max_edge = max_edge
+        # DEPRECATED (2026-06-03): the gate now uses the real per-share fee
+        # fee_per_share(p) = 0.07*p*(1-p) in the EV calc, not this flat 2%
+        # haircut. Kept only so existing config/callers don't break.
         self.fee_adjustment = fee_adjustment
         self.min_confidence = min_confidence
         self.preferred_entry_secs = preferred_entry_secs
@@ -166,14 +171,17 @@ class EntryLogic:
 
         decision.prob_edge = prob_edge
 
-        # EV calculations (kept for logging and dashboard, not for entry gate)
+        # Per-share EV with the REAL Polymarket taker fee: 0.07*p*(1-p),
+        # charged at entry on every trade. EV = (q - p) - fee_per_share(p),
+        # the same formula as feature_snapshot.net_ev_per_share. This is the
+        # `best_ev > 0` entry gate below, so it must reflect true fees — the
+        # old 2%-of-profit-on-winners haircut (self.fee_adjustment) let
+        # marginal near-50/50 trades through that lose money at live fees.
         yes_price = yes_best_ask
-        profit_yes = 1.0 - yes_price
-        ev_yes = (est_prob_up * (profit_yes * (1.0 - self.fee_adjustment))) - ((1.0 - est_prob_up) * yes_price)
+        ev_yes = (est_prob_up - yes_price) - fee_per_share(yes_price)
 
         no_price = no_best_ask
-        profit_no = 1.0 - no_price
-        ev_no = ((1.0 - est_prob_up) * (profit_no * (1.0 - self.fee_adjustment))) - (est_prob_up * no_price)
+        ev_no = ((1.0 - est_prob_up) - no_price) - fee_per_share(no_price)
 
         decision.ev_yes = ev_yes
         decision.ev_no = ev_no

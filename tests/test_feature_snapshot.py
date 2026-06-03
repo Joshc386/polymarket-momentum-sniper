@@ -14,27 +14,27 @@ from strategy.feature_snapshot import SnapshotInputs, build_feature_snapshot
 
 
 class TestNetEvPerShare:
-    """net_ev_per_share = (q - p) - 0.072*p*(1-p), Polymarket-doc fee."""
+    """net_ev_per_share = (q - p) - 0.07*p*(1-p), Polymarket-doc fee."""
 
     def test_yes_trade_known_input(self) -> None:
         # YES: q = est_prob_up = 0.60, p = entry_price = 0.55
         # gross = 0.60 - 0.55 = 0.05
-        # fee   = 0.072 * 0.55 * 0.45 = 0.017820
-        # net   = 0.05 - 0.017820 = 0.032180
+        # fee   = 0.07 * 0.55 * 0.45 = 0.017325
+        # net   = 0.05 - 0.017325 = 0.032675
         snap = build_feature_snapshot(
             SnapshotInputs(side="YES", entry_price=0.55, est_prob_up=0.60)
         )
-        assert snap["net_ev_per_share"] == pytest.approx(0.032180)
+        assert snap["net_ev_per_share"] == pytest.approx(0.032675)
 
     def test_no_trade_uses_complement_win_prob(self) -> None:
         # NO: q = 1 - est_prob_up = 0.65, p = entry_price = 0.60
         # gross = 0.65 - 0.60 = 0.05
-        # fee   = 0.072 * 0.60 * 0.40 = 0.017280
-        # net   = 0.05 - 0.017280 = 0.032720
+        # fee   = 0.07 * 0.60 * 0.40 = 0.016800
+        # net   = 0.05 - 0.016800 = 0.033200
         snap = build_feature_snapshot(
             SnapshotInputs(side="NO", entry_price=0.60, est_prob_up=0.35)
         )
-        assert snap["net_ev_per_share"] == pytest.approx(0.032720)
+        assert snap["net_ev_per_share"] == pytest.approx(0.033200)
 
 
 class TestProbEdge:

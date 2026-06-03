@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from logging_db.database import Database
+from strategy.feature_snapshot import fee_per_share
 
 logger = logging.getLogger(__name__)
 
@@ -145,13 +146,16 @@ def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
     won = (trade.side == "YES" and resolution == "UP") or \
           (trade.side == "NO" and resolution == "DOWN")
 
+    # Polymarket crypto taker fee, charged once at ENTRY on every trade
+    # (win or lose): FEE_RATE * shares * p * (1-p), p = entry price.
+    entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+
     if won:
         payout = trade.num_shares * 1.0
         gross_profit = payout - trade.size_usdc
-        fee = gross_profit * 0.02 if gross_profit > 0 else 0
-        trade.pnl = gross_profit - fee
+        trade.pnl = gross_profit - entry_fee
     else:
-        trade.pnl = -trade.size_usdc
+        trade.pnl = -trade.size_usdc - entry_fee
 
     return won
 
@@ -337,10 +341,11 @@ class PaperExecutionEngine:
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
-        # PnL = (exit - entry) * shares, fee only on profit
+        # PnL = (exit - entry) * shares, minus the single entry fee charged
+        # at position open (p = entry price), on every trade.
         gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
-        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
-        trade.pnl = gross_pnl - fee
+        entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+        trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
         if won:
@@ -674,9 +679,10 @@ class LiveExecutionEngine:
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
+        # Single entry fee charged at position open (p = entry price).
         gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
-        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
-        trade.pnl = gross_pnl - fee
+        entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+        trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
         if won:
