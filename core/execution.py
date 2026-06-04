@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from core.kill_switch_io import halt_active
 from logging_db.database import Database
 from strategy.feature_snapshot import fee_per_share
 
@@ -464,6 +465,16 @@ class LiveExecutionEngine:
         Chooses between GTC and FOK based on time remaining.
         Handles order monitoring and cancellation.
         """
+        # Kill switch: never place a NEW order once HALT is set. The kill
+        # switch owns cancellation/flattening; a recovering bot must not race
+        # it. Checked here (not only at the loop top) to close the mid-tick
+        # race between HALT being written and an order being placed.
+        if halt_active():
+            logger.warning(
+                f"[LIVE] HALT active -- refusing entry order: {side} @ ${price:.4f}"
+            )
+            return None
+
         # Determine which token to buy
         token_id = yes_token_id if side == "YES" else no_token_id
         if not token_id:
@@ -672,6 +683,15 @@ class LiveExecutionEngine:
         Returns:
             Resolved TradeRecord with PnL, or None if no position.
         """
+        # Kill switch: once HALT is set, defer flattening to the kill switch
+        # rather than racing it with the bot's own exit. The position is left
+        # untouched; the kill switch + manual reconciliation handle it.
+        if halt_active():
+            logger.warning(
+                f"[LIVE] HALT active -- deferring early exit ({reason}) to kill switch"
+            )
+            return None
+
         trade = self.pending_trade
         if not trade:
             return None

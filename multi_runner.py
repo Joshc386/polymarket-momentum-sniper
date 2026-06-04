@@ -33,6 +33,7 @@ from core.event_loop import setup_event_loop
 setup_event_loop()
 
 from core.polymarket_client import PolymarketClient
+from core.kill_switch_io import halt_active, write_heartbeat
 from core.market_discovery import MarketDiscovery
 from core.health_monitor import HealthMonitor
 from core.data_snapshot import build_snapshot
@@ -322,6 +323,22 @@ async def main() -> None:
         while not shutdown_event.is_set():
             now = time.time()
 
+            # ── Kill switch: honour the sticky HALT flag ──────────────
+            # If the kill switch (manual or watchdog) has fired, stop trading
+            # immediately and exit gracefully. HALT is sticky and human-cleared,
+            # so we do not resume on our own. The per-order guard in the live
+            # executor backstops the mid-tick race.
+            if halt_active():
+                logger.critical("HALT flag detected -- kill switch fired; stopping bot.")
+                try:
+                    await telegram.notify_bot_event(
+                        "KILL SWITCH", "HALT flag detected -- bot stopping."
+                    )
+                except Exception:
+                    pass
+                shutdown_event.set()
+                break
+
             # ── Market Discovery ──────────────────────────────────────
             if now - last_market_refresh > market_refresh_interval:
                 try:
@@ -331,6 +348,18 @@ async def main() -> None:
                 last_market_refresh = now
 
             mkt = market_discovery.current_market
+
+            # ── Kill switch: write the heartbeat (atomic) ─────────────
+            # The watchdog reads ts for staleness and window_end_ts/token_ids
+            # for the flatten guard. Written every loop so a hang shows up as
+            # a stale ts within ~1 tick. Best-effort: never let it break trading.
+            try:
+                write_heartbeat(
+                    window_end_ts=mkt.end_time if mkt else None,
+                    token_ids=[mkt.yes_token_id, mkt.no_token_id] if mkt else [],
+                )
+            except Exception as e:
+                logger.debug(f"Heartbeat write failed: {e}")
 
             # ── Orderbook: WS primary, REST fallback ─────────────────
             if mkt and mkt.yes_token_id:

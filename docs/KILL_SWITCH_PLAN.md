@@ -125,8 +125,16 @@ kill_switch:
 
 1. ✅ **Spike** `get_positions()` (§7.5) — **DONE 2026-06-04.** Was a silent stub;
    rewritten onto the public Data API + verified live. Next: step 2.
-2. Heartbeat writer + atomic write + `HALT` pre-order check & graceful exit in
-   `multi_runner.py` (+ unit tests).
+2. ✅ **Heartbeat writer + atomic write + `HALT` pre-order check & graceful exit
+   — DONE 2026-06-04.** Shared I/O module `core/kill_switch_io.py`
+   (atomic `write_heartbeat`/`write_halt`, fail-safe `read_heartbeat`,
+   `halt_active`, `clear_halt`); paths hardcoded as constants (config block
+   deferred to step 4/6). `multi_runner.py`: loop-top HALT check → graceful
+   exit + Telegram notify, atomic heartbeat write each tick (`mkt.end_time` +
+   tokens). Pre-order HALT guard added to `LiveExecutionEngine.execute_trade`
+   (entries) **and** `close_position_early` (exits — defers flattening to the
+   kill switch). Tests: `test_kill_switch_io.py` (11) + `test_execution_halt_guard.py`
+   (3); suite **487 → 501 green**.
 3. Kill action `tools/kill_switch.py` (+ mock-client unit tests).
 4. Watchdog `tools/watchdog.py` (+ fake-clock unit tests + integration test).
 5. On-chain CTF fallback for discovery.
