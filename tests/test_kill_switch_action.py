@@ -160,6 +160,43 @@ def test_retry_bounded_and_loud_when_not_flat(tmp_path):
     assert summary["unflattened"] and summary["unflattened"][0]["token_id"] == YES
 
 
+# --- CTF fallback merge (step 5) -----------------------------------------
+
+def test_ctf_fallback_surfaces_position_data_api_missed(tmp_path):
+    halt = tmp_path / "HALT"
+    hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
+    # Data API returns nothing (e.g. lagging/outage); CTF finds YES on-chain.
+    poly = _poly([[], []])
+
+    async def ctf_discover(token_ids):
+        assert token_ids == [YES, NO]  # scoped to heartbeat tokens
+        return [_pos(YES, 25.0)]
+
+    summary = asyncio.run(ks.run_kill(
+        trigger="watchdog", reason="t", poly=poly, now=1500.0,
+        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb,
+    ))
+    poly.place_order.assert_awaited()  # the CTF-discovered position got flattened
+    assert summary["sold"] and summary["sold"][0]["token_id"] == YES
+
+
+def test_merge_keeps_larger_size(tmp_path):
+    halt = tmp_path / "HALT"
+    hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
+    # Data API says 30; on-chain says 50 -> flatten the larger (bias to flatten).
+    poly = _poly([[_pos(YES, 30.0)], []])
+
+    async def ctf_discover(token_ids):
+        return [_pos(YES, 50.0)]
+
+    asyncio.run(ks.run_kill(
+        trigger="watchdog", reason="t", poly=poly, now=1500.0,
+        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb,
+    ))
+    _, kwargs = poly.place_order.call_args
+    assert kwargs["size"] == 50.0  # sold the larger of the two sources
+
+
 # --- no positions ---------------------------------------------------------
 
 def test_no_positions_is_clean(tmp_path):

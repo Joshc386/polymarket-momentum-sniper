@@ -93,6 +93,24 @@ def _remaining_size(positions: list[dict], token_id: str) -> float:
     )
 
 
+def _merge_positions(primary: list[dict], extra: list[dict]) -> list[dict]:
+    """Union two position lists by token_id, keeping the LARGER size (bias to
+    flatten more, never less). ``primary``'s condition_id wins when present."""
+    by_token: dict[str, dict] = {}
+    for p in list(primary) + list(extra):
+        token = str(p.get("token_id", ""))
+        size = float(p.get("size", 0) or 0)
+        cur = by_token.get(token)
+        if cur is None:
+            by_token[token] = {"token_id": token, "size": size,
+                               "condition_id": p.get("condition_id", "")}
+        else:
+            cur["size"] = max(cur["size"], size)
+            if not cur.get("condition_id") and p.get("condition_id"):
+                cur["condition_id"] = p["condition_id"]
+    return list(by_token.values())
+
+
 async def _flatten(poly, token_id: str, size: float, *, max_retries: int = MAX_RETRIES) -> float:
     """Aggressively sell ``size`` shares of ``token_id``. Returns shares remaining.
 
@@ -129,6 +147,7 @@ async def run_kill(
     now: float | None = None,
     guard_secs: float = FLATTEN_GUARD_SECS,
     max_retries: int = MAX_RETRIES,
+    ctf_discover=None,
     halt_path: Path = HALT_PATH,
     heartbeat_path: Path = HEARTBEAT_PATH,
 ) -> dict:
@@ -137,6 +156,8 @@ async def run_kill(
     ``trigger`` is ``"manual"`` or ``"watchdog"``; ``poly`` is an authenticated
     PolymarketClient (or a mock in tests). ``guard_secs``/``max_retries`` default
     to the module constants and are overridden from config at the entry point.
+    ``ctf_discover`` is an optional ``async (token_ids) -> list[dict]`` on-chain
+    fallback; when supplied, its results are merged with the Data API discovery.
     """
     now = time.time() if now is None else now
     summary: dict = {
@@ -156,19 +177,29 @@ async def run_kill(
         logger.error(f"cancel_all_orders failed: {e}")
     _log_event({"ts": time.time(), "action": "cancel_all", "ok": summary["cancelled"]})
 
-    # 3. Discover positions (account ground truth). CTF on-chain fallback is step 5.
+    # window_end_ts is shared by the tokens in the active heartbeat window.
+    hb = read_heartbeat(path=heartbeat_path) or {}
+    hb_tokens = list(hb.get("token_ids") or [])
+    window_end_ts = hb.get("window_end_ts")
+
+    # 3. Discover positions (account ground truth) from the Data API, merged with
+    #    the on-chain CTF fallback for the active window's tokens (belt-and-
+    #    suspenders: an account-wide Data API outage can't hide live exposure).
     try:
         positions = await poly.get_positions()
     except Exception as e:
         logger.error(f"get_positions failed during kill: {e}")
         positions = []
+    if ctf_discover is not None and hb_tokens:
+        try:
+            ctf = await ctf_discover(hb_tokens)
+        except Exception as e:
+            logger.error(f"CTF fallback discovery failed: {e}")
+            ctf = []
+        positions = _merge_positions(positions, ctf)
     positions = [p for p in positions if float(p.get("size", 0) or 0) > DUST]
     _log_event({"ts": time.time(), "action": "discover", "n": len(positions)})
-
-    # window_end_ts is shared by the tokens in the active heartbeat window.
-    hb = read_heartbeat(path=heartbeat_path) or {}
-    hb_tokens = set(hb.get("token_ids") or [])
-    window_end_ts = hb.get("window_end_ts")
+    hb_tokens = set(hb_tokens)
 
     # 4. Flatten each, subject to the >60s guard.
     for p in positions:
@@ -224,13 +255,22 @@ async def _main(trigger: str) -> None:
     from core.config import Config
     from core.polymarket_client import PolymarketClient
 
+    from core.ctf_balances import get_ctf_balances
+
     config = Config.load()
     poly = PolymarketClient(config)
     await poly.connect()
+
+    funder = config.polymarket_funder_address
+
+    async def ctf_discover(token_ids):
+        return await get_ctf_balances(funder, token_ids)
+
     summary = await run_kill(
         trigger=trigger, reason="manual kill switch invocation", poly=poly,
         guard_secs=config.ks_flatten_guard_secs,
         max_retries=config.ks_flatten_max_retries,
+        ctf_discover=ctf_discover if funder else None,
     )
     print(json.dumps(summary, indent=2))
 

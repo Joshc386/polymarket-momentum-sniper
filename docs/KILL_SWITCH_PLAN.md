@@ -186,13 +186,37 @@ kill_switch:
    `test_watchdog.py` (8, fake clock + fake-hung-bot `run()`); suite
    **509 → 517 green**.
 5. On-chain CTF fallback for discovery.
-5. On-chain CTF (ERC-1155) balance fallback for discovery — **not yet built**
-   (marked hook in `kill_switch.py`; needs web3 + a Polygon RPC).
-6. Windows Scheduled Task to supervise the watchdog — **not yet built** (deploy doc).
+5. ✅ **On-chain CTF (ERC-1155) balance fallback — DONE 2026-06-04.**
+   `core/ctf_balances.py` `get_ctf_balances(account, token_ids)` — raw Polygon
+   JSON-RPC `eth_call` to `balanceOf` (no web3; reuses the sm_trade_monitor RPC
+   pattern), `/1e6` → shares. `run_kill` gained an optional `ctf_discover` hook;
+   when wired it **merges** CTF balances (for the heartbeat tokens) with the
+   Data API positions (union, max size — bias to flatten more). Tests:
+   `test_ctf_balances.py` (6) + 2 merge tests; suite **519 → 527 green**.
+6. ✅ **Windows Scheduled Task supervisor — DONE 2026-06-04.**
+   `tools/install_watchdog_task.ps1` registers `python -m tools.watchdog` at
+   logon, auto-restart on failure (1-min interval, single instance), no time
+   limit. `-Remove` unregisters. See Deployment below.
 7. ✅ **Paper dry-run gate — automated core DONE 2026-06-04**
    (`test_kill_switch_integration.py`: real watchdog→kill→HALT + negative
    control). Manual runbook (real `multi_runner` process exiting) documented in
    §7.4 — **to be run by the user** before trusting it for the live probe.
+
+## 8a. Deployment (watchdog supervision)
+
+Install the OS-supervised watchdog (run once per machine, from the project root):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\install_watchdog_task.ps1
+Start-ScheduledTask -TaskName PolymarketKillSwitchWatchdog      # start immediately
+Get-ScheduledTask -TaskName PolymarketKillSwitchWatchdog | Get-ScheduledTaskInfo
+powershell -ExecutionPolicy Bypass -File tools\install_watchdog_task.ps1 -Remove
+```
+
+Only the **watchdog** is OS-supervised (auto-restart on crash). The **bot is
+not** — HALT is sticky and a human must review why it fired before re-enabling.
+After a kill: inspect `data_runtime/kill_switch.log`, resolve any open exposure,
+then `del data_runtime\HALT` to allow trading again.
 
 ## 9. Known v1 limitations (documented, accepted)
 
