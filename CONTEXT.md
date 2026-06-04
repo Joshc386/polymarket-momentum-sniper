@@ -59,15 +59,37 @@ confused with "neutral". Active/absent is determined in the snapshot builder
 - **Edge** (`prob_edge`) = `|est_prob_up − market_prob_up|`. Model-vs-market
   probability disagreement. The **entry gate** ("the TRUE edge metric" — price-
   level-normalised). TUI "Edge".
-- **EV** (`best_ev`) = `q·(1−p)·(1−fee) − (1−q)·p`. Dollar expected value per
+- **EV** (`best_ev`) = `(q − p) − fee_per_share(p)`. Dollar expected value per
   share. Mostly display, but `best_ev > 0` is also a gate condition. TUI "EV".
-  Currently computed with the **2% winner fee** (`fee_adjustment: 0.02`).
-- **Fee models disagree:** the live EV/PnL path uses 2%-on-winnings; backtests
-  (and Polymarket docs) use `0.072·p·(1−p)` per share. The latter is canonical
-  for analysis. `net_ev_per_share = (q − p) − 0.072·p·(1−p)`.
+  Since 2026-06-03 computed with the **real Polymarket taker fee**
+  `0.07·p·(1−p)` (charged at entry on every trade) — same as `net_ev_per_share`.
+- **Fee model (unified 2026-06-03):** the live PnL resolver AND the entry-gate
+  EV both use the canonical Polymarket taker fee `fee_per_share(p) = 0.07·p·(1−p)`
+  per share (single helper in `feature_snapshot.py`, `FEE_RATE = 0.07`).
+  `net_ev_per_share = (q − p) − 0.07·p·(1−p)`. The old 2%-on-winnings model was
+  removed from both sites (see J17). Backtests still carry a separate
+  `fee_adjustment` knob (low-fidelity harnesses, out of scope).
 - **Recording note:** the `trades.edge` column historically stores `best_ev`
   (the EV), NOT `prob_edge`. Enrichment adds `prob_edge` and `net_ev_per_share`
   as new, correctly-named columns; the legacy `edge` column is left unchanged.
+
+### Operational safety (kill switch — planned, see ADR-0002)
+- **Kill switch** — an emergency stop that runs as a **separate OS process** from
+  the trading bot, so it works even when the trading loop is hung. Cancels all
+  resting orders, flattens open positions, and disables trading. Manual
+  (`python -m tools.kill_switch`) or auto-fired by the watchdog.
+- **Heartbeat** — `data_runtime/heartbeat.json`, written by the bot every loop
+  iteration: `{ts, window_end_ts, token_ids}`. Liveness signal + the immutable
+  `window_end_ts` the flatten guard reads.
+- **Watchdog** — a separate, OS-supervised process that polls the heartbeat and
+  auto-fires the kill switch when it goes stale (fail-safe: stale/unreadable =
+  fire). The bot is *not* auto-restarted; the watchdog is.
+- **HALT flag** — `data_runtime/HALT`, sticky. Presence = trading disabled. The
+  bot checks it before every order and exits when set. **Cleared only by a
+  human** — resuming live trading requires explicit acknowledgement.
+- **Flatten** — force-exit open positions via an aggressive marketable sell that
+  accepts partial fills, but only if **>60s to resolution** (else let the 5-min
+  market resolve). 5-minute auto-resolution is the hard backstop.
 
 ### Bots (recording-relevant)
 - **Bot G** (`bot_g_signal_aligned`) — **DECOMMISSIONED / dead** (2026-06-01).
@@ -78,5 +100,7 @@ confused with "neutral". Active/absent is determined in the snapshot builder
 
 No bot is "frozen" for behaviour right now. The relevant constraint is narrower:
 **a logging/instrumentation change must not alter any entry/sizing/filter
-decision** — e.g. don't change the fee model inside `best_ev` because
-`best_ev > 0` gates entry. Adding logging columns is behaviour-neutral.
+decision** — adding logging columns is behaviour-neutral. (Deliberate,
+user-approved behaviour changes — like the 2026-06-03 fee correction inside
+`best_ev` — are fine; the rule is "no *accidental* behaviour change from a
+logging edit", not "never change the gate".)
