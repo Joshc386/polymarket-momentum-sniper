@@ -112,10 +112,38 @@ kill_switch:
 2. **Watchdog-logic unit tests** (inject fake clock + fake heartbeat contents):
    arm-after-first-heartbeat; fire on 3 consecutive stale; fail-safe on
    missing/unreadable; no-fire when fresh.
-3. **Integration — "fake hung bot"**: harness writes a heartbeat then stops; real
-   watchdog runs against a **mock client**; assert end-to-end fire.
-4. **Manual paper dry-run (gate before live):** induce staleness → watchdog fires
-   → `HALT` written → bot stops + exits. (Cancel/flatten are no-ops in paper.)
+3. **Integration — "fake hung bot": DONE 2026-06-04.** `tests/test_kill_switch_integration.py`
+   wires the REAL watchdog + REAL `run_kill` (only the Polymarket client mocked,
+   paper-style): a stale heartbeat fires the watchdog → kill action runs →
+   `HALT` is written → the bot's loop-top guard would see it. Plus a negative
+   control (fresh heartbeat never fires).
+4. **Manual paper dry-run (gate before live) — RUNBOOK below.** The automated
+   chain (item 3) covers watchdog→kill→HALT. The remaining manual check is that
+   the **real `multi_runner` process** stops + exits when it sees `HALT`:
+
+   ```
+   # Terminal A: start the paper bot (writes data_runtime/heartbeat.json each loop)
+   python multi_runner.py
+   # Confirm data_runtime/heartbeat.json exists and its "ts" advances.
+
+   # Option 1 — exercise the watchdog too (full chain):
+   #   Terminal B: start the watchdog, then freeze the bot's heartbeat.
+   python -m tools.watchdog
+   #   In Terminal A, pause the process (Windows: Ctrl+Pause, or suspend via
+   #   Resource Monitor) so the heartbeat goes stale. Within ~26s the watchdog
+   #   logs "FIRING", writes data_runtime/HALT + a kill_switch.log line.
+   #   Resume Terminal A: the bot logs "HALT flag detected", sends the Telegram
+   #   notice, and exits gracefully.
+
+   # Option 2 — exercise only the bot's HALT honouring (no watchdog):
+   python -m tools.kill_switch manual      # writes HALT directly
+   #   Terminal A should stop trading and exit within one loop (~1s).
+
+   # Reset for normal operation:
+   del data_runtime\HALT                    # (sticky — must be cleared by hand)
+   ```
+   Cancel/flatten are no-ops in paper (no live account); this validates the
+   signalling + graceful-exit wiring, not a real flatten (first flatten is live).
 5. **Q1 spike (read-only): DONE 2026-06-04.** Found the original
    `get_positions()` was a silent stub (CLOB SDK has no such method → always
    `[]`). Rewrote it onto the public Data API and verified the live contract
@@ -158,8 +186,13 @@ kill_switch:
    `test_watchdog.py` (8, fake clock + fake-hung-bot `run()`); suite
    **509 → 517 green**.
 5. On-chain CTF fallback for discovery.
-6. Windows Scheduled Task to supervise the watchdog (deployment doc).
-7. Paper dry-run gate → then trust it for the bounded-loss live probe.
+5. On-chain CTF (ERC-1155) balance fallback for discovery — **not yet built**
+   (marked hook in `kill_switch.py`; needs web3 + a Polygon RPC).
+6. Windows Scheduled Task to supervise the watchdog — **not yet built** (deploy doc).
+7. ✅ **Paper dry-run gate — automated core DONE 2026-06-04**
+   (`test_kill_switch_integration.py`: real watchdog→kill→HALT + negative
+   control). Manual runbook (real `multi_runner` process exiting) documented in
+   §7.4 — **to be run by the user** before trusting it for the live probe.
 
 ## 9. Known v1 limitations (documented, accepted)
 
