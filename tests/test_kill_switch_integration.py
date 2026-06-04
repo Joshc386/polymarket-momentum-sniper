@@ -41,7 +41,7 @@ def test_stale_heartbeat_fires_real_kill_and_writes_halt(tmp_path):
         captured["summary"] = await run_kill(
             trigger="watchdog",
             reason="heartbeat stale (integration test)",
-            poly=poly, now=200.0, halt_path=halt, heartbeat_path=hb,
+            poly=poly, now=200.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log",
         )
 
     wd = Watchdog(
@@ -72,7 +72,7 @@ def test_fresh_heartbeat_never_fires(tmp_path):
 
     async def on_fire():  # pragma: no cover - must never run
         await run_kill(trigger="watchdog", reason="x", poly=poly,
-                       halt_path=halt, heartbeat_path=hb)
+                       halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log")
 
     wd = Watchdog(on_fire=on_fire, heartbeat_path=hb, poll_secs=0.0,
                   staleness_secs=20.0, stale_checks_to_fire=3)

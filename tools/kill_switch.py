@@ -111,7 +111,8 @@ def _merge_positions(primary: list[dict], extra: list[dict]) -> list[dict]:
     return list(by_token.values())
 
 
-async def _flatten(poly, token_id: str, size: float, *, max_retries: int = MAX_RETRIES) -> float:
+async def _flatten(poly, token_id: str, size: float, *, max_retries: int = MAX_RETRIES,
+                   log_path: Path = KILL_LOG_PATH) -> float:
     """Aggressively sell ``size`` shares of ``token_id``. Returns shares remaining.
 
     Re-fetches the book each attempt and crosses the current best bid; accepts
@@ -125,11 +126,13 @@ async def _flatten(poly, token_id: str, size: float, *, max_retries: int = MAX_R
         bid = _best_bid(poly.get_orderbook(token_id))
         if bid is None or bid <= PRICE_FLOOR:
             _log_event({"ts": time.time(), "action": "flatten_no_bid",
-                        "token_id": token_id, "remaining": remaining, "attempt": attempt})
+                        "token_id": token_id, "remaining": remaining, "attempt": attempt},
+                       path=log_path)
             break
         price = round(max(PRICE_FLOOR, bid - TICK), 2)
         _log_event({"ts": time.time(), "action": "flatten_sell", "token_id": token_id,
-                    "price": price, "size": round(remaining, 2), "attempt": attempt})
+                    "price": price, "size": round(remaining, 2), "attempt": attempt},
+                   path=log_path)
         await poly.place_order(
             token_id=token_id, side="SELL", price=price, size=round(remaining, 2),
             order_type="GTC",
@@ -150,6 +153,7 @@ async def run_kill(
     ctf_discover=None,
     halt_path: Path = HALT_PATH,
     heartbeat_path: Path = HEARTBEAT_PATH,
+    log_path: Path = KILL_LOG_PATH,
 ) -> dict:
     """Execute the kill action. Returns a summary dict (also JSONL-logged).
 
@@ -168,14 +172,14 @@ async def run_kill(
 
     # 1. HALT first.
     write_halt(source=trigger, reason=reason, ts=now, path=halt_path)
-    _log_event({"ts": now, "action": "halt", "trigger": trigger, "reason": reason})
+    _log_event({"ts": now, "action": "halt", "trigger": trigger, "reason": reason}, path=log_path)
 
     # 2. Cancel all resting orders.
     try:
         summary["cancelled"] = bool(await poly.cancel_all_orders())
     except Exception as e:
         logger.error(f"cancel_all_orders failed: {e}")
-    _log_event({"ts": time.time(), "action": "cancel_all", "ok": summary["cancelled"]})
+    _log_event({"ts": time.time(), "action": "cancel_all", "ok": summary["cancelled"]}, path=log_path)
 
     # window_end_ts is shared by the tokens in the active heartbeat window.
     hb = read_heartbeat(path=heartbeat_path) or {}
@@ -198,7 +202,7 @@ async def run_kill(
             ctf = []
         positions = _merge_positions(positions, ctf)
     positions = [p for p in positions if float(p.get("size", 0) or 0) > DUST]
-    _log_event({"ts": time.time(), "action": "discover", "n": len(positions)})
+    _log_event({"ts": time.time(), "action": "discover", "n": len(positions)}, path=log_path)
     hb_tokens = set(hb_tokens)
 
     # 4. Flatten each, subject to the >60s guard.
@@ -213,10 +217,10 @@ async def run_kill(
                 summary["skipped"].append({"token_id": token, "size": size,
                                            "time_left": time_left})
                 _log_event({"ts": time.time(), "action": "skip_guard", "token_id": token,
-                            "time_left": time_left})
+                            "time_left": time_left}, path=log_path)
                 continue
         # known & >guard, OR unknown timing -> bias to sell.
-        remaining = await _flatten(poly, token, size, max_retries=max_retries)
+        remaining = await _flatten(poly, token, size, max_retries=max_retries, log_path=log_path)
         if remaining <= DUST:
             summary["sold"].append({"token_id": token, "size": size})
         else:
@@ -246,7 +250,7 @@ async def run_kill(
         )
     _log_event({"ts": time.time(), "action": "complete", "flat": summary["flat"],
                 "sold": summary["sold"], "skipped": summary["skipped"],
-                "unflattened": summary["unflattened"]})
+                "unflattened": summary["unflattened"]}, path=log_path)
     return summary
 
 

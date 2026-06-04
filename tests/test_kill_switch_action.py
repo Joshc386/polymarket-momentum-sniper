@@ -77,7 +77,7 @@ def test_halt_written_before_cancel(tmp_path):
 
     asyncio.run(ks.run_kill(
         trigger="manual", reason="test", poly=poly,
-        now=1500.0, halt_path=halt, heartbeat_path=hb,
+        now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log",
     ))
     assert ksio.halt_active(path=halt) is True
     assert saw_halt_at_cancel["halted"] is True  # HALT existed before cancel ran
@@ -88,7 +88,7 @@ def test_cancel_all_orders_called(tmp_path):
     hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
     poly = _poly([[], []])
     asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                            now=1500.0, halt_path=halt, heartbeat_path=hb))
+                            now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     poly.cancel_all_orders.assert_awaited_once()
 
 
@@ -100,7 +100,7 @@ def test_flattens_position_when_more_than_60s_to_resolution(tmp_path):
     hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
     poly = _poly([[_pos(YES, 100.0)], []])  # discover 100 shares, then flat
     asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                            now=1500.0, halt_path=halt, heartbeat_path=hb))
+                            now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     poly.place_order.assert_awaited()
     args, kwargs = poly.place_order.call_args
     assert (kwargs.get("side") or args[1]) == "SELL"
@@ -112,7 +112,7 @@ def test_skips_flatten_within_60s_guard(tmp_path):
     hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
     poly = _poly([[_pos(YES, 100.0)]])
     summary = asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                                      now=1950.0, halt_path=halt, heartbeat_path=hb))
+                                      now=1950.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     poly.place_order.assert_not_awaited()
     assert summary["skipped"] and summary["skipped"][0]["token_id"] == YES
 
@@ -123,7 +123,7 @@ def test_unknown_token_biases_to_sell(tmp_path):
     hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
     poly = _poly([[_pos(ORPHAN, 40.0)], []])
     asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                            now=1950.0, halt_path=halt, heartbeat_path=hb))
+                            now=1950.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     # even though "now" is inside the guard window for known tokens, an unknown
     # token has no known timing -> it must still be sold.
     poly.place_order.assert_awaited()
@@ -142,7 +142,7 @@ def test_retry_continues_on_partial_fills_until_flat(tmp_path):
         [],                   # final re-verify
     ])
     summary = asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                                      now=1500.0, halt_path=halt, heartbeat_path=hb))
+                                      now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     assert poly.place_order.await_count == 2
     assert summary["flat"] is True
 
@@ -154,7 +154,7 @@ def test_retry_bounded_and_loud_when_not_flat(tmp_path):
     seq = [[_pos(YES, 100.0)]] + [[_pos(YES, 100.0)]] * 10
     poly = _poly(seq)
     summary = asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                                      now=1500.0, halt_path=halt, heartbeat_path=hb))
+                                      now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     assert poly.place_order.await_count == ks.MAX_RETRIES
     assert summary["flat"] is False
     assert summary["unflattened"] and summary["unflattened"][0]["token_id"] == YES
@@ -174,7 +174,7 @@ def test_ctf_fallback_surfaces_position_data_api_missed(tmp_path):
 
     summary = asyncio.run(ks.run_kill(
         trigger="watchdog", reason="t", poly=poly, now=1500.0,
-        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb,
+        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log",
     ))
     poly.place_order.assert_awaited()  # the CTF-discovered position got flattened
     assert summary["sold"] and summary["sold"][0]["token_id"] == YES
@@ -191,7 +191,7 @@ def test_merge_keeps_larger_size(tmp_path):
 
     asyncio.run(ks.run_kill(
         trigger="watchdog", reason="t", poly=poly, now=1500.0,
-        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb,
+        ctf_discover=ctf_discover, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log",
     ))
     _, kwargs = poly.place_order.call_args
     assert kwargs["size"] == 50.0  # sold the larger of the two sources
@@ -204,6 +204,6 @@ def test_no_positions_is_clean(tmp_path):
     hb = _heartbeat(tmp_path, window_end_ts=2000.0, token_ids=[YES, NO])
     poly = _poly([[], []])
     summary = asyncio.run(ks.run_kill(trigger="manual", reason="t", poly=poly,
-                                      now=1500.0, halt_path=halt, heartbeat_path=hb))
+                                      now=1500.0, halt_path=halt, heartbeat_path=hb, log_path=halt.parent / "kill.log"))
     poly.place_order.assert_not_awaited()
     assert summary["flat"] is True
