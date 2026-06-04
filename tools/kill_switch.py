@@ -93,15 +93,15 @@ def _remaining_size(positions: list[dict], token_id: str) -> float:
     )
 
 
-async def _flatten(poly, token_id: str, size: float) -> float:
+async def _flatten(poly, token_id: str, size: float, *, max_retries: int = MAX_RETRIES) -> float:
     """Aggressively sell ``size`` shares of ``token_id``. Returns shares remaining.
 
     Re-fetches the book each attempt and crosses the current best bid; accepts
     partial fills; re-queries the account for the remaining size; retries up to
-    ``MAX_RETRIES`` or until flat / no bid / price floor.
+    ``max_retries`` or until flat / no bid / price floor.
     """
     remaining = size
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, max_retries + 1):
         if remaining <= DUST:
             break
         bid = _best_bid(poly.get_orderbook(token_id))
@@ -127,13 +127,16 @@ async def run_kill(
     poly,
     *,
     now: float | None = None,
+    guard_secs: float = FLATTEN_GUARD_SECS,
+    max_retries: int = MAX_RETRIES,
     halt_path: Path = HALT_PATH,
     heartbeat_path: Path = HEARTBEAT_PATH,
 ) -> dict:
     """Execute the kill action. Returns a summary dict (also JSONL-logged).
 
     ``trigger`` is ``"manual"`` or ``"watchdog"``; ``poly`` is an authenticated
-    PolymarketClient (or a mock in tests).
+    PolymarketClient (or a mock in tests). ``guard_secs``/``max_retries`` default
+    to the module constants and are overridden from config at the entry point.
     """
     now = time.time() if now is None else now
     summary: dict = {
@@ -174,15 +177,15 @@ async def run_kill(
         known = token in hb_tokens and isinstance(window_end_ts, (int, float))
         if known:
             time_left = window_end_ts - now
-            if time_left <= FLATTEN_GUARD_SECS:
+            if time_left <= guard_secs:
                 # Too close to resolution — cancel+halt already done; let it resolve.
                 summary["skipped"].append({"token_id": token, "size": size,
                                            "time_left": time_left})
                 _log_event({"ts": time.time(), "action": "skip_guard", "token_id": token,
                             "time_left": time_left})
                 continue
-        # known & >60s, OR unknown timing -> bias to sell.
-        remaining = await _flatten(poly, token, size)
+        # known & >guard, OR unknown timing -> bias to sell.
+        remaining = await _flatten(poly, token, size, max_retries=max_retries)
         if remaining <= DUST:
             summary["sold"].append({"token_id": token, "size": size})
         else:
@@ -208,7 +211,7 @@ async def run_kill(
         logger.critical(
             "KILL SWITCH: %d position(s) NOT flattened after %d retries: %s. "
             "Relying on 5-minute auto-resolution backstop.",
-            len(still_open), MAX_RETRIES, still_open,
+            len(still_open), max_retries, still_open,
         )
     _log_event({"ts": time.time(), "action": "complete", "flat": summary["flat"],
                 "sold": summary["sold"], "skipped": summary["skipped"],
@@ -224,7 +227,11 @@ async def _main(trigger: str) -> None:
     config = Config.load()
     poly = PolymarketClient(config)
     await poly.connect()
-    summary = await run_kill(trigger=trigger, reason="manual kill switch invocation", poly=poly)
+    summary = await run_kill(
+        trigger=trigger, reason="manual kill switch invocation", poly=poly,
+        guard_secs=config.ks_flatten_guard_secs,
+        max_retries=config.ks_flatten_max_retries,
+    )
     print(json.dumps(summary, indent=2))
 
 

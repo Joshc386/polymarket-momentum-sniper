@@ -88,17 +88,19 @@ No confirmation prompt (emergency tool must act instantly).
   gracefully** (flush logs / DB).
 - These are additive; no change to entry/sizing/signal logic.
 
-## 6. Config (new block, e.g. `kill_switch:` in config)
+## 6. Config (`kill_switch:` block) — DONE 2026-06-04
+
+Added to `config.yaml` + loaded into `Config` (`ks_*` fields) and consumed by
+the watchdog and `run_kill`. Paths stay as `core/kill_switch_io` constants
+(`data_runtime/heartbeat.json`, `HALT`) rather than config — fixed locations.
 
 ```yaml
 kill_switch:
-  heartbeat_path: data_runtime/heartbeat.json
-  halt_path: data_runtime/HALT
-  watchdog_poll_secs: 2
-  staleness_secs: 20
-  stale_checks_to_fire: 3
-  flatten_guard_secs: 60
-  flatten_max_retries: 4
+  watchdog_poll_secs: 2       # watchdog heartbeat poll cadence
+  staleness_secs: 20          # heartbeat age beyond this counts as stale
+  stale_checks_to_fire: 3     # consecutive stale checks before firing (~26s)
+  flatten_guard_secs: 60      # closer than this to resolution -> let it resolve
+  flatten_max_retries: 4      # aggressive-sell attempts per position
 ```
 
 ## 7. Test plan (TDD; see ADR-0002 for paper-mode reality)
@@ -145,7 +147,16 @@ kill_switch:
    `MAX_RETRIES=4` / `PRICE_FLOOR=0.01`. Audit record = `data_runtime/kill_switch.log`
    JSONL (kill_events table deferred). Tests: `test_kill_switch_action.py` (8,
    mock client); suite **501 → 509 green**. CTF fallback (step 5) is a marked hook.
-4. Watchdog `tools/watchdog.py` (+ fake-clock unit tests + integration test).
+4. ✅ **Watchdog `tools/watchdog.py` — DONE 2026-06-04.** `Watchdog` class:
+   `evaluate(now)` pure state machine (waiting → armed → fresh/stale → fire) +
+   async `run(max_polls)` loop. Arms after ≥1 valid heartbeat; fires after
+   `stale_checks_to_fire` consecutive polls with age > `staleness_secs`;
+   fail-safe (missing/corrupt = stale once armed); fires `run_kill("watchdog")`
+   once. Thresholds now **config-driven** — full `kill_switch:` block added to
+   `config.yaml` + `Config` fields (§6); `run_kill` gained optional
+   `guard_secs`/`max_retries` fed from config at the entry point. Tests:
+   `test_watchdog.py` (8, fake clock + fake-hung-bot `run()`); suite
+   **509 → 517 green**.
 5. On-chain CTF fallback for discovery.
 6. Windows Scheduled Task to supervise the watchdog (deployment doc).
 7. Paper dry-run gate → then trust it for the bounded-loss live probe.
