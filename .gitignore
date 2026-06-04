@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 bot_stderr.log
+*.log
+*.db
 backtest/data/
 
 # Local Claude Code agent permissions / session state

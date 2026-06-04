@@ -44,7 +44,28 @@ CREATE TABLE IF NOT EXISTS trades (
     ob_yes_depth REAL,                     -- YES side depth (top 5 levels)
     ob_ask_depth REAL,                     -- Ask side depth (top 5 levels)
     session_trade_num INTEGER,             -- Trade number within this session
-    resolved_at TEXT                       -- UTC timestamp when trade resolved
+    resolved_at TEXT,                      -- UTC timestamp when trade resolved
+    -- Full feature snapshot at entry (2026-06-01). NULL = layer not computed
+    -- this tick (never 0.0 for absent). See ADR-0001.
+    l1_lag_component REAL,
+    l1_open_component REAL,
+    l4_imbalance REAL,
+    l4_flow REAL,
+    l4_mid_dev REAL,
+    l4_top_pressure REAL,
+    l4_thickness REAL,
+    l6_fade REAL,
+    l7_taker_ratio REAL,
+    l8_clob_flow REAL,
+    l9b_absorption REAL,
+    l10_exhaustion REAL,
+    l11_trade_size REAL,
+    l12_wallet_flow REAL,
+    prob_edge REAL,                        -- |model_prob - market_prob| (gate metric)
+    net_ev_per_share REAL,                 -- (q-p) - 0.072*p*(1-p), Poly-doc fee
+    required_edge REAL,                    -- dynamic gate threshold at entry
+    secs_into_window REAL,                 -- 300 - time_remaining_secs
+    schedule_override TEXT                 -- regime schedule in force
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -106,6 +127,26 @@ _MIGRATIONS = [
     ("trades", "ob_ask_depth", "REAL"),
     ("trades", "session_trade_num", "INTEGER"),
     ("trades", "resolved_at", "TEXT"),
+    # Full feature snapshot at entry (2026-06-01) — see ADR-0001.
+    ("trades", "l1_lag_component", "REAL"),
+    ("trades", "l1_open_component", "REAL"),
+    ("trades", "l4_imbalance", "REAL"),
+    ("trades", "l4_flow", "REAL"),
+    ("trades", "l4_mid_dev", "REAL"),
+    ("trades", "l4_top_pressure", "REAL"),
+    ("trades", "l4_thickness", "REAL"),
+    ("trades", "l6_fade", "REAL"),
+    ("trades", "l7_taker_ratio", "REAL"),
+    ("trades", "l8_clob_flow", "REAL"),
+    ("trades", "l9b_absorption", "REAL"),
+    ("trades", "l10_exhaustion", "REAL"),
+    ("trades", "l11_trade_size", "REAL"),
+    ("trades", "l12_wallet_flow", "REAL"),
+    ("trades", "prob_edge", "REAL"),
+    ("trades", "net_ev_per_share", "REAL"),
+    ("trades", "required_edge", "REAL"),
+    ("trades", "secs_into_window", "REAL"),
+    ("trades", "schedule_override", "TEXT"),
     ("signal_log", "orderbook_signal", "REAL"),
     ("signal_log", "sentiment_signal", "REAL"),
     ("signal_log", "coinbase_direction", "REAL"),

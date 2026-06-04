@@ -90,3 +90,11 @@ logging:
   db_path: ./data_runtime/trades.db
   signal_log_path: ./data_runtime/signals.csv
   log_level: INFO
+
+# Independent kill switch + watchdog (ADR-0002). See docs/KILL_SWITCH_PLAN.md.
+kill_switch:
+  watchdog_poll_secs: 2       # how often the watchdog checks the heartbeat
+  staleness_secs: 20          # heartbeat age beyond this counts as stale
+  stale_checks_to_fire: 3     # consecutive stale checks before firing (~26s)
+  flatten_guard_secs: 60      # closer than this to resolution -> let it resolve
+  flatten_max_retries: 4      # aggressive-sell attempts per position

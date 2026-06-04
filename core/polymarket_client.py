@@ -9,6 +9,8 @@ import asyncio
 import logging
 from enum import Enum
 
+import httpx
+
 from core.config import Config
 from core.rate_limiter import TokenBucketRateLimiter, public_limiter, trading_limiter
 
@@ -17,6 +19,9 @@ logger = logging.getLogger(__name__)
 # Polymarket CLOB constants
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon
+
+# Public Data API — account-wide positions ("ground truth"); no auth required.
+DATA_API_HOST = "https://data-api.polymarket.com"
 
 
 class OrderType(Enum):
@@ -276,18 +281,65 @@ class PolymarketClient:
 
     # ── Position Tracking ─────────────────────────────────────────────
 
-    async def get_positions(self) -> list:
-        """Get current positions/balances for conditional tokens."""
-        if not self._authenticated or not self.client:
+    async def get_positions(self) -> list[dict]:
+        """Discover open positions from Polymarket's public Data API.
+
+        This is the kill switch's primary position-discovery source
+        (account-level ground truth, ADR-0002 §3). It queries
+        ``data-api.polymarket.com/positions?user=<funder>`` and is
+        deliberately INDEPENDENT of CLOB authentication: the kill switch must
+        be able to discover positions even when the trading client is
+        unhealthy or unauthenticated.
+
+        Returns a normalised list of
+        ``{"token_id": str, "size": float, "condition_id": str}`` for every
+        position with a positive size. Fail-safe: returns ``[]`` on any error
+        (logged at error level so a discovery failure is never silent).
+
+        NOTE: ``py-clob-client``'s ``ClobClient`` has no ``get_positions()``
+        method — positions are not a CLOB concept. They live in the off-chain
+        Data API (and on-chain as CTF ERC-1155 balances, the fallback source).
+        """
+        funder = self.config.polymarket_funder_address
+        if not funder:
+            logger.warning(
+                "get_positions: no POLYMARKET_FUNDER_ADDRESS configured -- "
+                "cannot discover positions"
+            )
             return []
 
         await self._public_limiter.acquire()
 
         try:
-            resp = self.client.get_positions()
-            if isinstance(resp, list):
-                return resp
-            return []
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(
+                    f"{DATA_API_HOST}/positions", params={"user": funder}
+                )
+                resp.raise_for_status()
+                data = resp.json()
         except Exception as e:
-            logger.debug(f"Failed to get positions: {e}")
+            logger.error(f"get_positions: Data API query failed: {e}")
             return []
+
+        if not isinstance(data, list):
+            logger.error(
+                f"get_positions: unexpected Data API response type: {type(data).__name__}"
+            )
+            return []
+
+        positions: list[dict] = []
+        for item in data:
+            try:
+                size = float(item.get("size", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if size <= 0:
+                continue
+            positions.append(
+                {
+                    "token_id": str(item.get("asset", "")),
+                    "size": size,
+                    "condition_id": str(item.get("conditionId", "")),
+                }
+            )
+        return positions

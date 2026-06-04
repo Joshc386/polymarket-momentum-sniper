@@ -10,7 +10,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from core.kill_switch_io import halt_active
 from logging_db.database import Database
+from strategy.feature_snapshot import fee_per_share
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,10 @@ class TradeRecord:
     ob_yes_depth: float = 0.0
     ob_ask_depth: float = 0.0
     session_trade_num: int = 0
+    # Full feature snapshot at entry (flat dict of all L1–L12 + sub-components,
+    # prob_edge, net_ev_per_share, secs_into_window, …). NULL-not-zero: a key
+    # whose value is None records as SQL NULL. See ADR-0001.
+    feature_snapshot: dict = field(default_factory=dict)
     # Outcome fields
     resolution: str | None = None  # "UP" or "DOWN" or None
     pnl: float | None = None
@@ -72,11 +78,23 @@ _TRADE_FIELDS = [
     "oracle_open_price",
 ]
 
+# Enriched feature-snapshot columns merged from trade.feature_snapshot at
+# insert time. Kept separate from the explicit columns above so a None value
+# records as SQL NULL (layer absent), never 0.0. See ADR-0001.
+_ENRICHED_COLUMNS = [
+    "l1_lag_component", "l1_open_component",
+    "l4_imbalance", "l4_flow", "l4_mid_dev", "l4_top_pressure", "l4_thickness",
+    "l6_fade", "l7_taker_ratio", "l8_clob_flow", "l9b_absorption",
+    "l10_exhaustion", "l11_trade_size", "l12_wallet_flow",
+    "prob_edge", "net_ev_per_share", "required_edge",
+    "secs_into_window", "schedule_override",
+]
+
 
 def _log_to_db(db, trade, is_paper: bool) -> int:
     """Insert a trade into the database. Returns row ID."""
     now_str = datetime.now(timezone.utc).isoformat()
-    return db.insert_trade(
+    params = dict(
         timestamp=now_str,
         market_id=trade.market_id,
         market_slug=trade.market_slug,
@@ -112,6 +130,14 @@ def _log_to_db(db, trade, is_paper: bool) -> int:
         ob_ask_depth=trade.ob_ask_depth,
         session_trade_num=trade.session_trade_num,
     )
+    # Merge the full feature snapshot (NULL-not-zero preserved: a None value
+    # writes as SQL NULL). Only the enriched columns are pulled in; keys that
+    # duplicate explicit columns above are ignored.
+    snap = getattr(trade, "feature_snapshot", None) or {}
+    for col in _ENRICHED_COLUMNS:
+        if col in snap:
+            params[col] = snap[col]
+    return db.insert_trade(**params)
 
 
 def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
@@ -121,13 +147,16 @@ def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
     won = (trade.side == "YES" and resolution == "UP") or \
           (trade.side == "NO" and resolution == "DOWN")
 
+    # Polymarket crypto taker fee, charged once at ENTRY on every trade
+    # (win or lose): FEE_RATE * shares * p * (1-p), p = entry price.
+    entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+
     if won:
         payout = trade.num_shares * 1.0
         gross_profit = payout - trade.size_usdc
-        fee = gross_profit * 0.02 if gross_profit > 0 else 0
-        trade.pnl = gross_profit - fee
+        trade.pnl = gross_profit - entry_fee
     else:
-        trade.pnl = -trade.size_usdc
+        trade.pnl = -trade.size_usdc - entry_fee
 
     return won
 
@@ -217,6 +246,7 @@ class PaperExecutionEngine:
         ob_yes_depth: float = 0.0,
         ob_ask_depth: float = 0.0,
         session_trade_num: int = 0,
+        feature_snapshot: dict | None = None,
     ) -> TradeRecord | None:
         """Simulate placing a trade. Returns TradeRecord if 'filled'."""
         fill_price = min(price + self.slippage, 0.99)
@@ -239,6 +269,7 @@ class PaperExecutionEngine:
             consecutive_losses=consecutive_losses, signal_weights=signal_weights,
             ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
             session_trade_num=session_trade_num,
+            feature_snapshot=feature_snapshot or {},
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=True)
@@ -311,10 +342,11 @@ class PaperExecutionEngine:
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
-        # PnL = (exit - entry) * shares, fee only on profit
+        # PnL = (exit - entry) * shares, minus the single entry fee charged
+        # at position open (p = entry price), on every trade.
         gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
-        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
-        trade.pnl = gross_pnl - fee
+        entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+        trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
         if won:
@@ -426,12 +458,23 @@ class LiveExecutionEngine:
         ob_yes_depth: float = 0.0,
         ob_ask_depth: float = 0.0,
         session_trade_num: int = 0,
+        feature_snapshot: dict | None = None,
     ) -> TradeRecord | None:
         """Place a real order on Polymarket.
 
         Chooses between GTC and FOK based on time remaining.
         Handles order monitoring and cancellation.
         """
+        # Kill switch: never place a NEW order once HALT is set. The kill
+        # switch owns cancellation/flattening; a recovering bot must not race
+        # it. Checked here (not only at the loop top) to close the mid-tick
+        # race between HALT being written and an order being placed.
+        if halt_active():
+            logger.warning(
+                f"[LIVE] HALT active -- refusing entry order: {side} @ ${price:.4f}"
+            )
+            return None
+
         # Determine which token to buy
         token_id = yes_token_id if side == "YES" else no_token_id
         if not token_id:
@@ -474,6 +517,7 @@ class LiveExecutionEngine:
             consecutive_losses=consecutive_losses, signal_weights=signal_weights,
             ob_spread=ob_spread, ob_yes_depth=ob_yes_depth, ob_ask_depth=ob_ask_depth,
             session_trade_num=session_trade_num, order_id=order_id,
+            feature_snapshot=feature_snapshot or {},
         )
 
         trade.db_id = _log_to_db(self.db, trade, is_paper=False)
@@ -639,6 +683,15 @@ class LiveExecutionEngine:
         Returns:
             Resolved TradeRecord with PnL, or None if no position.
         """
+        # Kill switch: once HALT is set, defer flattening to the kill switch
+        # rather than racing it with the bot's own exit. The position is left
+        # untouched; the kill switch + manual reconciliation handle it.
+        if halt_active():
+            logger.warning(
+                f"[LIVE] HALT active -- deferring early exit ({reason}) to kill switch"
+            )
+            return None
+
         trade = self.pending_trade
         if not trade:
             return None
@@ -646,9 +699,10 @@ class LiveExecutionEngine:
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
+        # Single entry fee charged at position open (p = entry price).
         gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
-        fee = gross_pnl * 0.02 if gross_pnl > 0 else 0.0
-        trade.pnl = gross_pnl - fee
+        entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+        trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
         if won:

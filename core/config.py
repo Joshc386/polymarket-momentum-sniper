@@ -101,6 +101,13 @@ class Config:
     sm_price_ceiling: float = 0.65
     sm_poll_interval: float = 3.0
 
+    # Kill switch / watchdog (ADR-0002). Thresholds are config-driven.
+    ks_watchdog_poll_secs: float = 2.0
+    ks_staleness_secs: float = 20.0
+    ks_stale_checks_to_fire: int = 3
+    ks_flatten_guard_secs: float = 60.0
+    ks_flatten_max_retries: int = 4
+
     # Logging
     db_path: str = "./data_runtime/trades.db"
     signal_log_path: str = "./data_runtime/signals.csv"
@@ -211,6 +218,15 @@ class Config:
             c.telegram_notify_every_trade = t.get("notify_every_trade", c.telegram_notify_every_trade)
             c.telegram_notify_daily_summary = t.get("notify_daily_summary", c.telegram_notify_daily_summary)
             c.telegram_paper_prefix = t.get("paper_prefix", c.telegram_paper_prefix)
+
+        # Kill switch / watchdog (ADR-0002)
+        ks = raw.get("kill_switch", {})
+        if isinstance(ks, dict):
+            c.ks_watchdog_poll_secs = ks.get("watchdog_poll_secs", c.ks_watchdog_poll_secs)
+            c.ks_staleness_secs = ks.get("staleness_secs", c.ks_staleness_secs)
+            c.ks_stale_checks_to_fire = ks.get("stale_checks_to_fire", c.ks_stale_checks_to_fire)
+            c.ks_flatten_guard_secs = ks.get("flatten_guard_secs", c.ks_flatten_guard_secs)
+            c.ks_flatten_max_retries = ks.get("flatten_max_retries", c.ks_flatten_max_retries)
 
         # Logging
         lg = raw.get("logging", {})
