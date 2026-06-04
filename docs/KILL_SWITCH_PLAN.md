@@ -135,7 +135,16 @@ kill_switch:
    (entries) **and** `close_position_early` (exits — defers flattening to the
    kill switch). Tests: `test_kill_switch_io.py` (11) + `test_execution_halt_guard.py`
    (3); suite **487 → 501 green**.
-3. Kill action `tools/kill_switch.py` (+ mock-client unit tests).
+3. ✅ **Kill action `tools/kill_switch.py` — DONE 2026-06-04.** `run_kill(trigger,
+   reason, poly, ...)` (importable so the watchdog uses the same path) +
+   `python -m tools.kill_switch [manual|watchdog]`. Halt-first: write HALT →
+   cancel_all → discover (`get_positions`) → flatten each subject to the >60s
+   guard (heartbeat `window_end_ts` matched by `token_ids`; unknown token →
+   bias-to-sell) → independent re-verify, loud CRITICAL log if not flat.
+   Flatten = re-fetch book, cross best bid −1 tick, accept partials, retry to
+   `MAX_RETRIES=4` / `PRICE_FLOOR=0.01`. Audit record = `data_runtime/kill_switch.log`
+   JSONL (kill_events table deferred). Tests: `test_kill_switch_action.py` (8,
+   mock client); suite **501 → 509 green**. CTF fallback (step 5) is a marked hook.
 4. Watchdog `tools/watchdog.py` (+ fake-clock unit tests + integration test).
 5. On-chain CTF fallback for discovery.
 6. Windows Scheduled Task to supervise the watchdog (deployment doc).
