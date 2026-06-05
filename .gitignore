@@ -14,3 +14,6 @@ backtest/data/
 
 # Nested research project — excluded pending review
 data/PolyMarket_Inefficient/
+
+# gstack local security reports / artifacts
+.gstack/
