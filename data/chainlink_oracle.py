@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -95,7 +96,7 @@ class ChainlinkOracle:
                 return
 
             except Exception as e:
-                logger.debug(f"Chainlink fetch failed via {rpc_url}: {e}")
+                logger.debug(f"Chainlink fetch failed via {urlsplit(rpc_url).hostname or '<rpc>'}: {e}")
                 continue
 
         logger.warning("All Chainlink RPC endpoints failed")

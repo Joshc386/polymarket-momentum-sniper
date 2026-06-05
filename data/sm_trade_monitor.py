@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -216,12 +217,12 @@ class SMTradeMonitor:
                 if "error" in data:
                     logger.debug(
                         "SM monitor RPC error via %s: %s",
-                        rpc_url, data["error"],
+                        urlsplit(rpc_url).hostname or "<rpc>", data["error"],
                     )
                     continue
                 return data
             except Exception as e:
-                logger.debug("SM monitor RPC failed via %s: %s", rpc_url, e)
+                logger.debug("SM monitor RPC failed via %s: %s", urlsplit(rpc_url).hostname or "<rpc>", e)
                 continue
 
         logger.warning("SM monitor: all RPC endpoints failed")
