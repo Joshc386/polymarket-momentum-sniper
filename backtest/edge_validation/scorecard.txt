@@ -1,0 +1,41 @@
+EDGE VALIDATION — live K bots vs retired Bot G
+(ground-truth resolved trades; read-only)
+
+====================================================================
+Bot K (SM confirmation) [LIVE]
+--------------------------------------------------------------------
+  resolved trades : 2894   (2026-05-09 .. 2026-06-05)
+  total PnL       : +1866.31   ROI +17.97%   win% 0.535
+  mean PnL/trade  : +0.6449  t=7.44  (trade-level, inflated)
+  DAILY PnL       : +71.78/day  t=3.60  (20/26 positive days)  <- honest significance
+  max drawdown    : -192   return/DD 9.7x
+  Brier model/mkt : 0.2482 / 0.2502   => MODEL beats market (edge)
+  realized P(UP)  : 0.572   est 0.503   mkt 0.520
+  -- config eras --
+     net_ev absent : N=2551  mean=+0.595 t=6.35  total=+1518
+     net_ev present: N= 343  mean=+1.015 t=4.60  total=+348
+
+====================================================================
+Bot K2 (L1 floor) [LIVE]
+--------------------------------------------------------------------
+  resolved trades : 807   (2026-05-29 .. 2026-06-05)
+  total PnL       : +481.74   ROI +19.83%   win% 0.560
+  mean PnL/trade  : +0.5970  t=4.35  (trade-level, inflated)
+  DAILY PnL       : +60.22/day  t=2.94  (6/8 positive days)  <- honest significance
+  max drawdown    : -70   return/DD 6.9x
+  Brier model/mkt : 0.2472 / 0.2563   => MODEL beats market (edge)
+  realized P(UP)  : 0.458   est 0.487   mkt 0.524
+  -- config eras --
+     net_ev absent : N= 475  mean=+0.303 t=1.58  total=+144
+     net_ev present: N= 332  mean=+1.017 t=5.39  total=+338
+
+====================================================================
+Bot G (signal-aligned) [RETIRED]
+--------------------------------------------------------------------
+  resolved trades : 5049   (2026-04-14 .. 2026-06-02)
+  total PnL       : -206.47   ROI -1.37%   win% 0.434
+  mean PnL/trade  : -0.0409  t=-0.62  (trade-level, inflated)
+  DAILY PnL       : -4.59/day  t=-0.63  (17/45 positive days)  <- honest significance
+  max drawdown    : -615   return/DD 0.3x
+  Brier model/mkt : 0.2514 / 0.2332   => market beats model (no edge)
+  realized P(UP)  : 0.551   est 0.510   mkt 0.524

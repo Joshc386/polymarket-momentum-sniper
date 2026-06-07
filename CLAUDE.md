@@ -17,7 +17,7 @@ A trading bot targeting Polymarket's 5-minute Bitcoin Up/Down markets. Uses a th
 - Paper trading is currently live — all changes must be validated in paper trading before any live deployment
 - Project structure is well organised with clear folders — maintain this standard for all new code
 - This bot handles real money — every change must be treated with the caution that implies
-- **Currently active bots:** Bot G (signal-aligned, paper). Bots A-F retired/disabled. Bot K (maker variant of Bot G) in design — first live deployment when ready
+- **Currently active bots:** Bot K (SM-confirmation) and Bot K2 (Bot K + directional L1 floor) — both paper, running A/B. Bots A-F and Bot G retired (Bot G decommissioned 2026-06-01). Bot K is the go-live candidate.
 
 ---
 
