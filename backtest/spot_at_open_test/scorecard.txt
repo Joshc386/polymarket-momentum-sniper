@@ -1,0 +1,34 @@
+SPOT-AT-OPEN MISPRICING TEST  (read-only, ground-truth resolved windows)
+data era: 2026-03-08 .. 2026-04-08   threshold |spot-open| <= $10
+========================================================================
+  qualifying snapshots : 10196   across 5363 windows  / 32 days
+  realized P(Up) here  : 0.5136   (naive view says this should be ~0.5000)
+  mean UP ask / DOWN ask: 0.6208 / 0.6115   (mean implied, both sides)
+  -- conditional calibration (realized P(Up) by UP price) --
+     price~0.189  realized=0.302  n=   43   mispriced↑
+     price~0.280  realized=0.232  n=  151   mispriced↓
+     price~0.378  realized=0.343  n=  814   mispriced↓
+     price~0.467  realized=0.465  n= 2662   fair
+     price~0.547  realized=0.551  n= 3130   fair
+     price~0.644  realized=0.679  n=  838   mispriced↑
+     price~0.741  realized=0.759  n=  166   fair
+     price~0.836  realized=0.879  n=   58   mispriced↑
+     price~0.990  realized=0.515  n= 2329   mispriced↓
+
+  -- underpriced-side strategy (buy the side priced < 0.5) --
+   [gross (no cost) ] N=  6932  win%=0.408  EV/trade=-0.0172  total=-119
+                      day-clustered t=-1.65 (11/24 +days)   window-clustered t=-3.00 (N=3751)  <- honest
+   [slippage only   ] N=  6932  win%=0.408  EV/trade=-0.0222  total=-154
+                      day-clustered t=-2.06 (8/24 +days)   window-clustered t=-3.71 (N=3751)  <- honest
+   [full (fee+slip) ] N=  6932  win%=0.408  EV/trade=-0.0422  total=-292
+                      day-clustered t=-3.45 (6/24 +days)   window-clustered t=-6.57 (N=3751)  <- honest
+
+  -- robustness: first qualifying snapshot per window, full friction --
+   N=  3479  win%=0.423  EV/trade=-0.0421  total=-146  day-t=-4.13 (4/24 +days)
+
+  CAVEATS:
+   - Mar–Apr era; predates the current net_ev config (tests the MARKET, not the bot).
+   - spot & open are Binance prices; settlement oracle may differ (see signal_ticks
+     oracle_open_price for a recency/reference cross-check if an edge shows here).
+   - 'any moment' => many correlated snapshots per window; trust the window/day-
+     clustered t-stats, not raw N.
