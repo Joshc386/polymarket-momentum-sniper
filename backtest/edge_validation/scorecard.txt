@@ -1,41 +1,30 @@
-EDGE VALIDATION — live K bots vs retired Bot G
+EDGE VALIDATION — live K bots (Bot K, Bot K2)
 (ground-truth resolved trades; read-only)
 
 ====================================================================
 Bot K (SM confirmation) [LIVE]
 --------------------------------------------------------------------
-  resolved trades : 2894   (2026-05-09 .. 2026-06-05)
-  total PnL       : +1866.31   ROI +17.97%   win% 0.535
-  mean PnL/trade  : +0.6449  t=7.44  (trade-level, inflated)
-  DAILY PnL       : +71.78/day  t=3.60  (20/26 positive days)  <- honest significance
-  max drawdown    : -192   return/DD 9.7x
-  Brier model/mkt : 0.2482 / 0.2502   => MODEL beats market (edge)
-  realized P(UP)  : 0.572   est 0.503   mkt 0.520
+  resolved trades : 3086   (2026-05-09 .. 2026-06-08)
+  total PnL       : +1953.38   ROI +17.70%   win% 0.532
+  mean PnL/trade  : +0.6330  t=7.56  (trade-level, inflated)
+  DAILY PnL       : +67.36/day  t=3.66  (23/29 positive days)  <- honest significance
+  max drawdown    : -192   return/DD 10.2x
+  Brier model/mkt : 0.2483 / 0.2501   => MODEL beats market (edge)
+  realized P(UP)  : 0.570   est 0.503   mkt 0.519
   -- config eras --
      net_ev absent : N=2551  mean=+0.595 t=6.35  total=+1518
-     net_ev present: N= 343  mean=+1.015 t=4.60  total=+348
+     net_ev present: N= 535  mean=+0.814 t=4.45  total=+435
 
 ====================================================================
 Bot K2 (L1 floor) [LIVE]
 --------------------------------------------------------------------
-  resolved trades : 807   (2026-05-29 .. 2026-06-05)
-  total PnL       : +481.74   ROI +19.83%   win% 0.560
-  mean PnL/trade  : +0.5970  t=4.35  (trade-level, inflated)
-  DAILY PnL       : +60.22/day  t=2.94  (6/8 positive days)  <- honest significance
-  max drawdown    : -70   return/DD 6.9x
-  Brier model/mkt : 0.2472 / 0.2563   => MODEL beats market (edge)
-  realized P(UP)  : 0.458   est 0.487   mkt 0.524
+  resolved trades : 1038   (2026-05-29 .. 2026-06-08)
+  total PnL       : +501.99   ROI +17.22%   win% 0.557
+  mean PnL/trade  : +0.4836  t=4.26  (trade-level, inflated)
+  DAILY PnL       : +45.64/day  t=2.63  (8/11 positive days)  <- honest significance
+  max drawdown    : -70   return/DD 7.2x
+  Brier model/mkt : 0.2473 / 0.2557   => MODEL beats market (edge)
+  realized P(UP)  : 0.468   est 0.491   mkt 0.519
   -- config eras --
      net_ev absent : N= 475  mean=+0.303 t=1.58  total=+144
-     net_ev present: N= 332  mean=+1.017 t=5.39  total=+338
-
-====================================================================
-Bot G (signal-aligned) [RETIRED]
---------------------------------------------------------------------
-  resolved trades : 5049   (2026-04-14 .. 2026-06-02)
-  total PnL       : -206.47   ROI -1.37%   win% 0.434
-  mean PnL/trade  : -0.0409  t=-0.62  (trade-level, inflated)
-  DAILY PnL       : -4.59/day  t=-0.63  (17/45 positive days)  <- honest significance
-  max drawdown    : -615   return/DD 0.3x
-  Brier model/mkt : 0.2514 / 0.2332   => market beats model (no edge)
-  realized P(UP)  : 0.551   est 0.510   mkt 0.524
+     net_ev present: N= 563  mean=+0.636 t=4.79  total=+358

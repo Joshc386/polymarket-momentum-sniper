@@ -8,9 +8,7 @@ every trade carries its real resolution and PnL). For each bot it answers:
      signal engine add information, or would "just trust the order book" do as well?
   3. Where does the edge live / where does it leak (regime, config era, calibration)?
 
-Targets the two currently-live bots. Retired Bot G is kept for contrast — it had
-NO measurable edge and the market out-predicted it, which is the whole reason the
-K-series (SM confirmation + L1 floor) exists.
+Targets the two currently-live bots (Bot K, Bot K2).
 
 Outputs (read-only — nothing written back to any DB):
   backtest/edge_validation/<bot>/calibration.png
@@ -35,11 +33,10 @@ RUNTIME = REPO / "data_runtime"
 OUT = REPO / "backtest" / "edge_validation"
 OUT.mkdir(exist_ok=True)
 
-# live bots first; Bot G retained for contrast
+# the two currently-live bots
 BOTS = [
     ("bot_k_sm_confirmation", "Bot K (SM confirmation) [LIVE]"),
     ("bot_k2_l1_floor", "Bot K2 (L1 floor) [LIVE]"),
-    ("bot_g_signal_aligned", "Bot G (signal-aligned) [RETIRED]"),
 ]
 
 
@@ -191,7 +188,7 @@ def scorecard(df, name) -> str:
 
 
 def main():
-    report = ["EDGE VALIDATION — live K bots vs retired Bot G",
+    report = ["EDGE VALIDATION — live K bots (Bot K, Bot K2)",
               "(ground-truth resolved trades; read-only)"]
     for slug, name in BOTS:
         (OUT / slug).mkdir(exist_ok=True)
