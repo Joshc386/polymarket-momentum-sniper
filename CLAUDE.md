@@ -255,6 +255,26 @@ The Completed section of `to-do.md` is the audit trail — every meaningful chan
 
 ---
 
+### Regime Monitor Agent
+
+**Role:** Daily drift watch on the LIVE bots — catches a regime shift *before* it masquerades as signal degradation (the late-May "strong-bullish-L1 evaporated" failure mode).
+
+**Responsibilities:**
+- Aggregate the per-trade tags the live bots already store (`oracle_lag_signal`=L1, `regime`, `btc_price_at_entry`) into a daily profile: L1 distribution, BTC level/vol, regime mix
+- Bucket win%/PnL by L1 zone (symmetric `|L1|>=0.4` strong) and regime label
+- Drift alarm: compare a recent window vs a trailing baseline and flag material shifts — L1 mean (in baseline-σ units), %bull, L1 zone-mix (PSI), volatility, and the headline **expected-edge-at-risk** (recent regime mix weighted by baseline per-zone payoff)
+
+**Constraints:**
+- Read-only — reads `data_runtime/<bot>.db`, writes CSVs + scorecard to `data_runtime/regime_monitor/`; never writes back to any bot DB
+- Pure aggregation/bucketing/PSI logic is regression-tested (`tests/test_regime_monitor.py`)
+- Drift thresholds are module constants (v1) — descriptive alarm, not an auto-action
+
+**Key areas:** `agents/regime_monitor.py`, `data_runtime/<bot>.db`
+
+**CLI:** `python -m agents.regime_monitor {profile|pnl|drift|report}`
+
+---
+
 ### Signal Lab Agent
 
 **Role:** Rapid prototyping and evaluation of new signal hypotheses before they enter the live signal engine.
