@@ -56,10 +56,22 @@ from data.sm_trade_monitor import SMTradeMonitor
 from data.wallet_flow_monitor import WalletFlowMonitor
 
 # ── Logging ───────────────────────────────────────────────────────────
+# Persist logs to file (J28: the Jun-10/11 resolution corruption ran for
+# 2 days undetected because warnings went only to an unwatched stderr).
+_LOG_DIR = Path(__file__).resolve().parent / "data_runtime"
+_LOG_DIR.mkdir(exist_ok=True)
+from logging.handlers import RotatingFileHandler  # noqa: E402
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stderr)],
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+        RotatingFileHandler(
+            _LOG_DIR / "multi_runner.log",
+            maxBytes=10_000_000, backupCount=3, encoding="utf-8",
+        ),
+    ],
 )
 logger = logging.getLogger("multi_runner")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -90,41 +102,61 @@ async def detect_resolution(
     slug: str,
     oracle: PolymarketOracle,
     price_aggregator=None,
+    retry_delays: tuple = (0, 3, 4, 5),
 ) -> str:
     """Determine market resolution — preferring actual Polymarket result.
 
-    First tries the authoritative source: Polymarket's own resolution
-    from the Gamma API (outcomePrices). Falls back to comparing the
-    bot's reference price (3-feed aggregated) vs the PolyBackTest
-    window-open snapshot only if the API resolution is unavailable.
+    Retries the authoritative source (Gamma API outcomePrices) over ~12s —
+    Polymarket usually settles a few seconds after window end, so the old
+    single immediate poll routinely missed and dropped into the price
+    comparison fallback (J28: with a zero window-open that fallback
+    fabricated 'UP' on every API miss, corrupting 2 days of paper records).
+
+    The fallback now requires BOTH a live aggregated price and a valid
+    window-open. If either is missing, returns 'UNKNOWN' — callers must
+    leave the trade pending rather than fabricate an outcome.
 
     Args:
         market_discovery: MarketDiscovery instance for API lookups.
         slug: Slug of the market to resolve.
         oracle: PolymarketOracle (used for window_open_price).
         price_aggregator: PriceAggregator for the live BTC reference price.
+        retry_delays: Sleep before each Gamma API attempt (seconds). Total
+            must stay well under 30s — this blocks the runner loop, and
+            entries open 30s into the next window.
 
     Returns:
-        'UP' or 'DOWN'.
+        'UP', 'DOWN', or 'UNKNOWN' (never resolved by guesswork).
     """
-    # Primary: actual market resolution from Polymarket
-    resolution = await market_discovery.fetch_resolution(slug)
-    if resolution in ("UP", "DOWN"):
-        logger.info(f"Resolution from Polymarket API: {resolution}")
-        return resolution
+    for delay in retry_delays:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        resolution = await market_discovery.fetch_resolution(slug)
+        if resolution in ("UP", "DOWN"):
+            logger.info(f"Resolution from Polymarket API: {resolution}")
+            return resolution
 
-    # Fallback: live aggregated price vs window-open snapshot.
-    # (oracle.price was the old 2-feed avg; superseded by aggregated_price
-    # which uses 3 USD-native feeds.)
-    logger.warning(
-        f"Market {slug} resolution unknown from API — "
-        f"falling back to aggregated price comparison"
-    )
+    # Fallback: live aggregated price vs window-open snapshot — only when
+    # both inputs are valid.
     fallback_price = (
         price_aggregator.price if price_aggregator and price_aggregator.price > 0
         else 0.0
     )
-    if fallback_price >= oracle.window_open_price:
+    open_price = oracle.window_open_price
+    if fallback_price <= 0 or open_price <= 0:
+        logger.critical(
+            f"Market {slug} UNRESOLVABLE: API unknown after "
+            f"{len(retry_delays)} attempts and fallback inputs invalid "
+            f"(agg={fallback_price}, open={open_price}) — leaving pending"
+        )
+        return "UNKNOWN"
+
+    logger.warning(
+        f"Market {slug} resolution unknown from API after "
+        f"{len(retry_delays)} attempts — falling back to price comparison "
+        f"(agg={fallback_price:.2f} vs open={open_price:.2f})"
+    )
+    if fallback_price >= open_price:
         return "UP"
     return "DOWN"
 
@@ -374,10 +406,10 @@ async def main() -> None:
                         logger.debug(f"Orderbook REST fallback: {e}")
                     last_orderbook_refresh = now
 
-            # NOTE: oracle.update_price() removed — the 2-feed (Binance/Coinbase)
-            # average was a worse proxy for the same thing aggregated_price now
-            # provides via 3-feed USD-native mean. oracle.window_open_price still
-            # populated separately via the PolyBackTest API (different code path).
+            # NOTE: per-tick oracle.update_price() stays removed (the 2-feed
+            # average was superseded by the 3-feed aggregated_price). The
+            # oracle is now seeded once per window at the new-window blocks
+            # (J28 fix) so the window-open fallback works without PolyBackTest.
 
             # ── Health monitor ────────────────────────────────────────
             if binance.price > 0:
@@ -437,12 +469,18 @@ async def main() -> None:
                         f"Startup: observing in-progress window {mkt.slug}, "
                         f"will trade from next window"
                     )
-                    # Set exchange avg immediately, poll PolyBackTest in background
+                    # Seed the oracle with the 3-feed aggregated price so the
+                    # window open is set immediately ("price at the first tick
+                    # of the window"). PolyBackTest, if available, refines it
+                    # in the background. (J28: without this seed the open
+                    # stayed 0 whenever PolyBackTest was down -> dead L1,
+                    # blank TUI OHLC, fabricated fallback resolutions.)
+                    if price_aggregator.price > 0:
+                        oracle.update_price(binance_price=price_aggregator.price)
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
                     # Track window high/low from the bot's actual reference
-                    # price (3-feed aggregated). oracle.price is no longer
-                    # maintained as of 2026-05-21.
+                    # price (3-feed aggregated).
                     window_high_price = price_aggregator.price
                     window_low_price = price_aggregator.price
 
@@ -461,11 +499,21 @@ async def main() -> None:
                         f"Window transition: {last_window_slug} -> {mkt.slug} | "
                         f"Resolution: {resolution}"
                     )
-                    for bot in bots:
-                        try:
-                            bot.on_window_end(resolution)
-                        except Exception as e:
-                            logger.error(f"Bot {bot.name} on_window_end error: {e}")
+                    if resolution == "UNKNOWN":
+                        # Never fabricate an outcome (J28). Trades stay
+                        # pending; the stale-pending safety net below
+                        # re-attempts resolution (by the trade's own slug)
+                        # once Polymarket has settled.
+                        logger.critical(
+                            f"{last_window_slug}: resolution UNKNOWN — "
+                            f"leaving pending trades for the safety net"
+                        )
+                    else:
+                        for bot in bots:
+                            try:
+                                bot.on_window_end(resolution)
+                            except Exception as e:
+                                logger.error(f"Bot {bot.name} on_window_end error: {e}")
 
                     # ── New window setup ──────────────────────────────
                     last_window_slug = mkt.slug
@@ -479,12 +527,15 @@ async def main() -> None:
                             wallet_flow_monitor.set_market(
                                 mkt.yes_token_id, mkt.no_token_id, mkt.slug,
                             )
-                    # Set exchange avg immediately, poll PolyBackTest in background
+                    # Seed the oracle with the 3-feed aggregated price so the
+                    # window open is set immediately (J28 fix — see startup
+                    # block above). PolyBackTest refines in the background.
+                    if price_aggregator.price > 0:
+                        oracle.update_price(binance_price=price_aggregator.price)
                     oracle.start_window_open_fetch(expected_slug=mkt.slug)
                     window_open_price = oracle.window_open_price
                     # Track window high/low from the bot's actual reference
-                    # price (3-feed aggregated). oracle.price is no longer
-                    # maintained as of 2026-05-21.
+                    # price (3-feed aggregated).
                     window_high_price = price_aggregator.price
                     window_low_price = price_aggregator.price
 
@@ -521,10 +572,16 @@ async def main() -> None:
                                 f"Force-resolving {bot.name} trade after "
                                 f"window end ({pending_age:.0f}s)"
                             )
+                            # Resolve by the TRADE's own market, not
+                            # last_window_slug — which may already point at
+                            # a newer window by the time this net fires (J28).
                             resolution = await detect_resolution(
-                                market_discovery, last_window_slug, oracle, price_aggregator
+                                market_discovery,
+                                bot.executor.pending_trade.market_slug,
+                                oracle, price_aggregator,
                             )
-                            bot.on_window_end(resolution)
+                            if resolution != "UNKNOWN":
+                                bot.on_window_end(resolution)
             elif mkt:
                 # Safety fallback: 600s stuck trade
                 for bot in bots:
@@ -536,9 +593,12 @@ async def main() -> None:
                                 f"after {pending_age:.0f}s"
                             )
                             resolution = await detect_resolution(
-                                market_discovery, last_window_slug, oracle, price_aggregator
+                                market_discovery,
+                                bot.executor.pending_trade.market_slug,
+                                oracle, price_aggregator,
                             )
-                            bot.on_window_end(resolution)
+                            if resolution != "UNKNOWN":
+                                bot.on_window_end(resolution)
 
             # ── Update window open from background fetch ─────────────
             # oracle.window_open_price updates in-place when PolyBackTest
@@ -624,17 +684,22 @@ async def main() -> None:
         sys.stdout.flush()
         logger.info("Cleaning up...")
 
-        # Resolve any final pending trades
+        # Resolve any final pending trades (no retries on shutdown — and
+        # never fabricate: an UNKNOWN trade stays pending in the DB rather
+        # than being settled by guesswork; it resolves on next startup or
+        # via repair tooling)
         if last_window_slug:
             try:
                 resolution = await detect_resolution(
-                    market_discovery, last_window_slug, oracle, price_aggregator
+                    market_discovery, last_window_slug, oracle,
+                    price_aggregator, retry_delays=(0,),
                 )
-                for bot in bots:
-                    try:
-                        bot.on_window_end(resolution)
-                    except Exception:
-                        pass
+                if resolution != "UNKNOWN":
+                    for bot in bots:
+                        try:
+                            bot.on_window_end(resolution)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
