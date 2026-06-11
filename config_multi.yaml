@@ -623,10 +623,14 @@ bots:
       low_volatility_threshold: 0.0001
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
-      # BTC distance stop — exit when BTC moves $100+ against us vs
-      # window open. Backtest: dist=$100, min_rem=60s → 91% helped,
-      # +$74.20 over 2,263 trades. Scales with position size.
-      btc_distance_stop: 100.0
+      # BTC distance stop — exit when BTC moves $90+ against us vs
+      # window open. Original backtest: dist=$100, min_rem=60s → 91%
+      # helped, +$74.20 over 2,263 trades. Tightened 100→90 on
+      # 2026-06-11 (user risk preference pre-go-live): $75-$95 sweep
+      # showed all thresholds EV-neutral within noise; tighter trigger
+      # offsets the $0-30 polling-latency overshoot recorded in
+      # EARLY_EXIT tags. See backtest/btc_distance_stop_replay.py.
+      btc_distance_stop: 90.0
       btc_distance_min_secs_remaining: 60.0
       # Drawdown breaker — pause all trading if bankroll drops 30%
       # from peak. Prevents catastrophic spirals.
@@ -748,7 +752,8 @@ bots:
       low_volatility_threshold: 0.0001
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
-      btc_distance_stop: 100.0
+      # Tightened 100→90 on 2026-06-11, identical to Bot K (A/B fairness).
+      btc_distance_stop: 90.0
       btc_distance_min_secs_remaining: 60.0
       drawdown_pct: 0.30
       daily_trade_cap: 150
