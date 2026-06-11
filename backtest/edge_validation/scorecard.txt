@@ -4,27 +4,27 @@ EDGE VALIDATION — live K bots (Bot K, Bot K2)
 ====================================================================
 Bot K (SM confirmation) [LIVE]
 --------------------------------------------------------------------
-  resolved trades : 3086   (2026-05-09 .. 2026-06-08)
-  total PnL       : +1953.38   ROI +17.70%   win% 0.532
-  mean PnL/trade  : +0.6330  t=7.56  (trade-level, inflated)
-  DAILY PnL       : +67.36/day  t=3.66  (23/29 positive days)  <- honest significance
-  max drawdown    : -192   return/DD 10.2x
-  Brier model/mkt : 0.2483 / 0.2501   => MODEL beats market (edge)
-  realized P(UP)  : 0.570   est 0.503   mkt 0.519
+  resolved trades : 3480   (2026-05-09 .. 2026-06-11)
+  total PnL       : +2032.09   ROI +16.36%   win% 0.531
+  mean PnL/trade  : +0.5839  t=7.45  (trade-level, inflated)
+  DAILY PnL       : +63.50/day  t=3.76  (25/32 positive days)  <- honest significance
+  max drawdown    : -192   return/DD 10.6x
+  Brier model/mkt : 0.2486 / 0.2497   => MODEL beats market (edge)
+  realized P(UP)  : 0.562   est 0.502   mkt 0.519
   -- config eras --
      net_ev absent : N=2551  mean=+0.595 t=6.35  total=+1518
-     net_ev present: N= 535  mean=+0.814 t=4.45  total=+435
+     net_ev present: N= 929  mean=+0.553 t=3.92  total=+514
 
 ====================================================================
 Bot K2 (L1 floor) [LIVE]
 --------------------------------------------------------------------
-  resolved trades : 1038   (2026-05-29 .. 2026-06-08)
-  total PnL       : +501.99   ROI +17.22%   win% 0.557
-  mean PnL/trade  : +0.4836  t=4.26  (trade-level, inflated)
-  DAILY PnL       : +45.64/day  t=2.63  (8/11 positive days)  <- honest significance
-  max drawdown    : -70   return/DD 7.2x
-  Brier model/mkt : 0.2473 / 0.2557   => MODEL beats market (edge)
-  realized P(UP)  : 0.468   est 0.491   mkt 0.519
+  resolved trades : 1435   (2026-05-29 .. 2026-06-11)
+  total PnL       : +509.23   ROI +12.41%   win% 0.547
+  mean PnL/trade  : +0.3549  t=3.65  (trade-level, inflated)
+  DAILY PnL       : +36.37/day  t=2.46  (9/14 positive days)  <- honest significance
+  max drawdown    : -80   return/DD 6.4x
+  Brier model/mkt : 0.2479 / 0.2531   => MODEL beats market (edge)
+  realized P(UP)  : 0.477   est 0.492   mkt 0.516
   -- config eras --
      net_ev absent : N= 475  mean=+0.303 t=1.58  total=+144
-     net_ev present: N= 563  mean=+0.636 t=4.79  total=+358
+     net_ev present: N= 960  mean=+0.380 t=3.46  total=+365
