@@ -91,6 +91,27 @@ confused with "neutral". Active/absent is determined in the snapshot builder
   accepts partial fills, but only if **>60s to resolution** (else let the 5-min
   market resolve). 5-minute auto-resolution is the hard backstop.
 
+### Execution policy vocabulary (maker fills — J26/J27)
+The live entry is a **GTC round**: a maker limit posted at the touch (the bid),
+cancelled after 10s if unfilled. Every validated entry happens in the **maker
+regime** (>60s remaining); below the 60s entry floor the bot does not enter.
+
+- **Miss** — a GTC round that times out unfilled. *Not* a dropped trade: the
+  bot re-evaluates next tick and may post again.
+- **Re-post loop** — the emergent live behaviour: cancel on timeout, post a new
+  round at the then-current touch, repeat until fill or the 60s floor. Captures
+  most misses eventually, as a maker, at the new touch.
+- **Adverse selection** (maker) — a resting bid fills precisely when the side
+  weakens, and systematically misses the runners. Empirical signature: missed
+  rounds win far more often than filled ones (~0.62–0.92 vs ~0.52–0.53).
+- **Chase / taker fallback** — crossing the spread at the repriced ask (paying
+  the taker fee) to capture a miss instead of re-posting. +EV vs miss=drop, but
+  only ~+16–28% vs the re-post loop — adoption deferred pending real fill
+  telemetry (J27).
+- **Hybrid (chase-at-floor)** — candidate policy: free maker re-post rounds,
+  then one chase at the 60s floor for whatever is still unfilled. Computable
+  from the same T1 telemetry; unmeasured.
+
 ### Bots (recording-relevant)
 - **Bot G** (`bot_g_signal_aligned`) — **DECOMMISSIONED / dead** (2026-06-01).
   No longer trading. Historical data retained.

@@ -40,8 +40,8 @@ sys.path.insert(0, str(REPO))
 from backtest.maker_fill_realism import (  # noqa: E402
     BOTS,
     GTC_TIMEOUT_S,
+    RUNTIME,
     _day_t,
-    _load_mid_paths,
     _load_trades,
     taker_fee,
     would_fill,
@@ -53,6 +53,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 PREMIUM_CAPS = [0.00, 0.01, 0.02, 0.03, 0.05, np.inf]
 TIMEOUT_TOL_S = 10.0   # accept the tick nearest (timeout ± tol)
 MAX_CHASE_ASK = 0.97   # don't model chasing into a near-resolved book
+ENTRY_FLOOR_S = 60.0   # latest_entry_secs — no posting below this
+POST_TOL_S = 5.0       # tick must be within ±5s of the re-post moment
 
 
 def capture_pnl(won: int, chase_ask: float) -> float:
@@ -66,9 +68,67 @@ def chase_ask_at_timeout(p_side_timeout: float, spread: float) -> float:
     return min(p_side_timeout + spread, 0.99)
 
 
+def repost_fill(entry_sr: float, entry_bid: float, spread: float,
+                secs: np.ndarray, p_side: np.ndarray,
+                gate_ok: np.ndarray | None = None,
+                floor: float = ENTRY_FLOOR_S,
+                timeout: float = GTC_TIMEOUT_S) -> tuple[bool, float]:
+    """Sequential GTC re-post — what live ALREADY does on a miss.
+
+    Round 0 posts at the entry bid. Each timeout, cancel and re-post at the
+    then-current touch (nearest tick to the re-post moment), until fill or the
+    60s entry floor. A round's order fills iff the bot-side price trades
+    through the resting bid (drops >= one spread) within that round.
+
+    gate_ok (optional) aligned with secs: live only re-posts when the entry
+    gate still passes (prob_edge >= required_edge, side unchanged). None =
+    price-only re-posting (maximal baseline, conservative against the chase).
+
+    Returns (filled, fill_price). Pure — regression-tested.
+    """
+    t_post = entry_sr
+    bid = entry_bid
+    while t_post > floor:
+        lo = max(t_post - timeout, floor)
+        if bid is not None:
+            m = (secs < t_post) & (secs >= lo)
+            if m.any() and (p_side[m] <= bid - spread).any():
+                return True, bid
+        t_post -= timeout
+        if t_post <= floor:
+            break
+        # re-post at the touch nearest the new post moment (if gate allows)
+        d = np.abs(secs - t_post)
+        if d.size == 0 or d.min() > POST_TOL_S:
+            continue  # no tick near the re-post moment; nothing rests this round
+        i = int(d.argmin())
+        if gate_ok is not None and not gate_ok[i]:
+            bid = None  # gate failed — live posts nothing this round
+        else:
+            bid = float(p_side[i])
+    return False, float("nan")
+
+
+def _load_paths_with_gate(bot: str) -> dict[str, pd.DataFrame]:
+    """Mid path + per-tick entry-gate fields (position-independent: from the
+    snapshot builder, which runs every tick). would_enter is NOT usable here —
+    it is gated on `not self._has_position` so it reads 0 after the paper entry."""
+    import sqlite3
+    with sqlite3.connect(str(RUNTIME / f"{bot}_signal_diag.db")) as c:
+        st = pd.read_sql_query(
+            "SELECT market_slug, secs_remaining, market_implied_prob AS mip, "
+            "prob_edge, required_edge, would_pick_side "
+            "FROM signal_ticks WHERE secs_remaining BETWEEN 0 AND 300 "
+            "AND market_implied_prob IS NOT NULL",
+            c,
+        )
+    return {slug: g.sort_values("secs_remaining", ascending=False)
+            for slug, g in st.groupby("market_slug")}
+
+
 def _simulate_bot(bot: str) -> tuple[pd.DataFrame, dict] | None:
     trades = _load_trades(bot)
-    paths = _load_mid_paths(bot)
+    paths = _load_paths_with_gate(bot)
     rows = []
     for t in trades.itertuples():
         path = paths.get(t.market_slug)
@@ -85,10 +145,26 @@ def _simulate_bot(bot: str) -> tuple[pd.DataFrame, dict] | None:
             p_path = (1.0 - seg["mip"]).to_numpy()
         filled = would_fill(p_side_entry, t.ob_spread, p_path)
 
+        # sequential re-post baselines (full in-window path after entry)
+        full = path[path["secs_remaining"] < entry_sr]
+        f_secs = full["secs_remaining"].to_numpy()
+        f_pside = (full["mip"].to_numpy() if t.side == "YES"
+                   else 1.0 - full["mip"].to_numpy())
+        gate_ok = ((full["prob_edge"].to_numpy() >= full["required_edge"].to_numpy())
+                   & (full["would_pick_side"].to_numpy() == t.side))
+        rp_fill, rp_price = repost_fill(entry_sr, p_side_entry, t.ob_spread,
+                                        f_secs, f_pside, gate_ok=None)
+        rg_fill, rg_price = repost_fill(entry_sr, p_side_entry, t.ob_spread,
+                                        f_secs, f_pside, gate_ok=gate_ok)
+
         row = {
             "day": t.day, "side": t.side, "won": t.won, "entry": t.entry_price,
             "spread": t.ob_spread, "filled": filled,
             "pnl_maker": (t.won - p_side_entry) if filled else np.nan,
+            "repost_filled": rp_fill,
+            "pnl_repost": (t.won - rp_price) if rp_fill else np.nan,
+            "repost_gated_filled": rg_fill,
+            "pnl_repost_gated": (t.won - rg_price) if rg_fill else np.nan,
             "chase_ask": np.nan, "chase_premium": np.nan, "pnl_chase": np.nan,
         }
         if not filled:
@@ -137,9 +213,15 @@ def _report_bot(bot: str, name: str) -> str:
          "",
          "  -- policies (per-share PnL, real resolutions, day-clustered t) --"]
 
-    # 1. maker-only baseline
-    L.append(_policy_line("maker-only (status quo)", fills["pnl_maker"],
+    # 1. maker baselines: single-shot, then sequential re-post (live as-is)
+    L.append(_policy_line("maker 1-shot (miss=drop)", fills["pnl_maker"],
                           fills["day"], fills["won"]))
+    rp = df[df["repost_filled"]]
+    L.append(_policy_line("re-post price-only (max)", rp["pnl_repost"],
+                          rp["day"], rp["won"]))
+    rg = df[df["repost_gated_filled"]]
+    L.append(_policy_line("re-post gate-checked LIVE", rg["pnl_repost_gated"],
+                          rg["day"], rg["won"]))
 
     # 2/3. chase policies: maker fills + chased subset
     grid_rows = []
