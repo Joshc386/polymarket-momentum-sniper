@@ -3,10 +3,18 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+EXCHANGE_MIN_USDC = 1.0  # Polymarket minimum order
+
+
 class PositionSizer:
     """Kelly-adjacent position sizing.
 
-    Uses quarter-Kelly to be conservative, with absolute min/max bounds.
+    Uses quarter-Kelly to be conservative. Two clamp modes:
+    - legacy (default): absolute min/max bounds in USDC.
+    - wallet_proportional: floor = max($1 exchange min, floor_pct of the
+      sizing wallet), ceiling = ceiling_pct of the sizing wallet, where
+      sizing wallet = min(bankroll, wallet_cap_usdc). Above the cap the
+      band freezes (e.g. $2-$10 at the default 1%/5%/$200).
     """
 
     def __init__(
@@ -14,10 +22,18 @@ class PositionSizer:
         kelly_multiplier: float = 0.25,
         min_bet_usdc: float = 1.0,
         max_bet_usdc: float = 5.0,
+        wallet_proportional: bool = False,
+        floor_pct: float = 0.01,
+        ceiling_pct: float = 0.05,
+        wallet_cap_usdc: float = 200.0,
     ):
         self.kelly_multiplier = kelly_multiplier
         self.min_bet_usdc = min_bet_usdc
         self.max_bet_usdc = max_bet_usdc
+        self.wallet_proportional = wallet_proportional
+        self.floor_pct = floor_pct
+        self.ceiling_pct = ceiling_pct
+        self.wallet_cap_usdc = wallet_cap_usdc
 
     def compute(
         self,
@@ -50,17 +66,27 @@ class PositionSizer:
             return 0.0
 
         adjusted_fraction = kelly_fraction * self.kelly_multiplier * size_multiplier
-        bet_size = adjusted_fraction * bankroll
 
-        # Clamp to bounds
-        bet_size = max(self.min_bet_usdc, min(self.max_bet_usdc, bet_size))
+        if self.wallet_proportional:
+            # The whole computation is proportional to the capped sizing
+            # wallet (validated in backtest/compounding_sizing_replay.py):
+            # above the cap, bets stop growing entirely.
+            sizing_wallet = min(bankroll, self.wallet_cap_usdc)
+            bet_size = adjusted_fraction * sizing_wallet
+            floor = max(EXCHANGE_MIN_USDC, self.floor_pct * sizing_wallet)
+            ceiling = self.ceiling_pct * sizing_wallet
+        else:
+            bet_size = adjusted_fraction * bankroll
+            floor = self.min_bet_usdc
+            ceiling = self.max_bet_usdc
+        bet_size = max(floor, min(ceiling, bet_size))
 
         # Don't bet more than bankroll allows
         if bet_size > bankroll:
             bet_size = bankroll
 
         # Below minimum after all adjustments
-        if bet_size < self.min_bet_usdc:
+        if bet_size < floor:
             return 0.0
 
         return round(bet_size, 2)

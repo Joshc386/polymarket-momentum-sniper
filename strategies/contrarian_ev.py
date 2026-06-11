@@ -240,6 +240,10 @@ class ContrarianEvStrategy:
             kelly_multiplier=sizing_cfg.get("kelly_multiplier", 0.25),
             min_bet_usdc=sizing_cfg.get("min_bet_usdc", 1.0),
             max_bet_usdc=sizing_cfg.get("max_bet_usdc", 5.0),
+            wallet_proportional=sizing_cfg.get("wallet_proportional", False),
+            floor_pct=sizing_cfg.get("floor_pct", 0.01),
+            ceiling_pct=sizing_cfg.get("ceiling_pct", 0.05),
+            wallet_cap_usdc=sizing_cfg.get("wallet_cap_usdc", 200.0),
         )
 
         risk_cfg = cfg.get("risk", {})
@@ -345,6 +349,7 @@ class ContrarianEvStrategy:
             db=self._db,
             initial_bankroll=sizing_cfg.get("initial_bankroll", 100.0),
             slippage=entry_cfg.get("fok_slippage", 0.005),
+            bankroll_epoch=sizing_cfg.get("bankroll_epoch"),
         )
         self._executor.restore_from_db()
 

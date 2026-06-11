@@ -177,10 +177,12 @@ class PaperExecutionEngine:
         db: Database,
         initial_bankroll: float = 100.0,
         slippage: float = 0.005,
+        bankroll_epoch: str | None = None,
     ):
         self.db = db
         self.bankroll = initial_bankroll
         self.slippage = slippage
+        self.bankroll_epoch = bankroll_epoch
         self.pending_trade: TradeRecord | None = None
         self.pending_trade_time: float = 0.0
         self.session_trades: list[TradeRecord] = []
@@ -190,10 +192,14 @@ class PaperExecutionEngine:
         self.is_paper = True
 
     def restore_from_db(self) -> None:
-        """Log all-time stats on startup for reference.
+        """Restore state on startup.
 
-        Bankroll, session trades, and equity curve all start fresh.
-        All trades remain stored in the database for historical analysis.
+        With `bankroll_epoch` set, the wallet persists across restarts:
+        bankroll = initial + realised PnL since the epoch (so the
+        wallet-proportional sizer sees a compounding wallet). Without an
+        epoch, bankroll starts fresh at initial (legacy behaviour).
+        Session trades and equity curve always start fresh; all trades
+        remain stored in the database for historical analysis.
         """
         if not self.db.conn:
             return
@@ -211,6 +217,18 @@ class PaperExecutionEngine:
             logger.info(
                 f"All-time paper stats: {row[1]} trades, "
                 f"{row[2]}W/{row[3]}L, P&L=${row[0]:+.2f}"
+            )
+
+        if self.bankroll_epoch:
+            epoch_pnl = self.db.conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+                "WHERE is_paper = 1 AND pnl IS NOT NULL AND timestamp >= ?",
+                (self.bankroll_epoch,),
+            ).fetchone()[0]
+            self.bankroll += epoch_pnl
+            logger.info(
+                f"Wallet restored from epoch {self.bankroll_epoch}: "
+                f"${self.bankroll:.2f} (epoch PnL ${epoch_pnl:+.2f})"
             )
 
         logger.info(f"New session started: bankroll=${self.bankroll:.2f}")
