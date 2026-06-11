@@ -1,0 +1,46 @@
+MAKER-FILL REALISM — Track B (actual logged trades, mid-path fill model)
+read-only; paper assumes 100% fill at ask, reality is maker-at-bid + adverse selection
+
+========================================================================
+Bot K (SM confirmation)  [bot_k_sm_confirmation]
+------------------------------------------------------------------------
+  resolved trades w/ entry+spread : 3164
+  covered by signal_ticks mid path: 1702 (54%)   [uncovered = silent signal_diag gap / pre-logging]
+
+  PAPER BASELINE (recomputed: fill@ask + 7.2% taker fee, 100% fill)
+    N=1702  win%=0.579  EV/sh=+0.1072  total=+182.5  ROI=+23.6%
+    day-clustered t=3.67 (14/17 +days)
+
+  REALISTIC MAKER — STRICT window (10s GTC)
+    fill rate=0.441  (751/1702 fill)
+    FILLED:  win%=0.533  EV/sh=+0.0918  total=+68.9  ROI=+20.8%   day-t=3.25 (14/17+)
+    MISSED:  win%=0.615  (n=951)   <- ADVERSE (missed are winners)
+    VERDICT: realistic total +68.9 vs paper +182.5  => edge DEGRADED
+
+  REALISTIC MAKER — OPTIMISTIC window (entry..60s-left, re-post)
+    fill rate=0.818  (1393/1702 fill)
+    FILLED:  win%=0.522  EV/sh=+0.0834  total=+116.2  ROI=+19.0%   day-t=2.56 (12/17+)
+    MISSED:  win%=0.835  (n=309)   <- ADVERSE (missed are winners)
+    VERDICT: realistic total +116.2 vs paper +182.5  => edge SURVIVES
+
+========================================================================
+Bot K2 (L1 floor)  [bot_k2_l1_floor]
+------------------------------------------------------------------------
+  resolved trades w/ entry+spread : 1111
+  covered by signal_ticks mid path: 638 (57%)   [uncovered = silent signal_diag gap / pre-logging]
+
+  PAPER BASELINE (recomputed: fill@ask + 7.2% taker fee, 100% fill)
+    N=638  win%=0.600  EV/sh=+0.1014  total=+64.7  ROI=+21.1%
+    day-clustered t=3.05 (7/7 +days)
+
+  REALISTIC MAKER — STRICT window (10s GTC)
+    fill rate=0.487  (311/638 fill)
+    FILLED:  win%=0.524  EV/sh=+0.0482  total=+15.0  ROI=+10.1%   day-t=2.20 (6/7+)
+    MISSED:  win%=0.673  (n=327)   <- ADVERSE (missed are winners)
+    VERDICT: realistic total +15.0 vs paper +64.7  => edge DEGRADED
+
+  REALISTIC MAKER — OPTIMISTIC window (entry..60s-left, re-post)
+    fill rate=0.796  (508/638 fill)
+    FILLED:  win%=0.520  EV/sh=+0.0501  total=+25.5  ROI=+10.7%   day-t=1.89 (5/7+)
+    MISSED:  win%=0.915  (n=130)   <- ADVERSE (missed are winners)
+    VERDICT: realistic total +25.5 vs paper +64.7  => edge DEGRADED
