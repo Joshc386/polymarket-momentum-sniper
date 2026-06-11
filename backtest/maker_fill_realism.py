@@ -50,6 +50,13 @@ TAKER_FEE_RATE = 0.072       # crypto-category taker fee: 0.072 * p * (1-p)
 GTC_TIMEOUT_S = 10.0         # strict window: one GTC timeout
 TAKER_FLOOR_SECS = 60.0      # optimistic window extends to here (then bot would FOK)
 
+# Optional A/B-window mode: pass an ISO date as argv[1] (e.g. 2026-05-29) to
+# restrict to trades >= that date AND exclude zero-open (L1-dead) windows,
+# matching backtest/k2_ab_eval.py conventions. Outputs get a suffix so the
+# full-period J26 artifacts are never overwritten.
+SINCE: str | None = None
+SUFFIX = ""
+
 
 def taker_fee(p: float) -> float:
     return TAKER_FEE_RATE * p * (1.0 - p)
@@ -67,14 +74,18 @@ def would_fill(p_side_entry: float, spread: float, p_side_path: np.ndarray) -> b
 
 
 def _load_trades(bot: str) -> pd.DataFrame:
+    query = (
+        "SELECT timestamp, market_slug, side, entry_price, ob_spread, "
+        "time_remaining_secs, resolution, size_usdc FROM trades "
+        "WHERE resolution IN ('UP','DOWN') AND entry_price IS NOT NULL "
+        "AND ob_spread IS NOT NULL"
+    )
+    params: tuple = ()
+    if SINCE:
+        query += " AND timestamp >= ? AND oracle_price_at_open != 0"
+        params = (SINCE,)
     with sqlite3.connect(str(RUNTIME / f"{bot}.db")) as c:
-        df = pd.read_sql_query(
-            "SELECT timestamp, market_slug, side, entry_price, ob_spread, "
-            "time_remaining_secs, resolution, size_usdc FROM trades "
-            "WHERE resolution IN ('UP','DOWN') AND entry_price IS NOT NULL "
-            "AND ob_spread IS NOT NULL",
-            c,
-        )
+        df = pd.read_sql_query(query, c, params=params)
     df["ts"] = pd.to_datetime(df["timestamp"], utc=True, format="ISO8601")
     df["day"] = df["ts"].dt.date
     df["won"] = ((df["side"] == "YES") & (df["resolution"] == "UP")) | \
@@ -180,7 +191,7 @@ def _report_bot(bot: str, name: str) -> str:
         else:
             total = roi = fill_win = float("nan"); ft = fd = fpd = 0
         miss_win = miss["won"].mean() if len(miss) else float("nan")
-        cov.to_csv(OUT / f"{bot}_{window}.csv", index=False)
+        cov.to_csv(OUT / f"{bot}_{window}{SUFFIX}.csv", index=False)
         L += [
             "",
             f"  REALISTIC MAKER — {window.upper()} window "
@@ -197,10 +208,16 @@ def _report_bot(bot: str, name: str) -> str:
 
 
 def main() -> None:
+    global SINCE, SUFFIX
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if len(sys.argv) > 1:
+        SINCE = sys.argv[1]
+        SUFFIX = f"_since_{SINCE}"
     out = ["MAKER-FILL REALISM — Track B (actual logged trades, mid-path fill model)",
            "read-only; paper assumes 100% fill at ask, reality is maker-at-bid + adverse selection"]
+    if SINCE:
+        out.append(f"A/B-WINDOW MODE: trades >= {SINCE}, zero-open (L1-dead) windows excluded")
     for bot, name in BOTS:
         try:
             out.append(_report_bot(bot, name))
@@ -208,7 +225,7 @@ def main() -> None:
             out.append(f"\n[{bot}] SKIPPED — {e}")
     text = "\n".join(out)
     print(text)
-    (OUT / "scorecard.txt").write_text(text, encoding="utf-8")
+    (OUT / f"scorecard{SUFFIX}.txt").write_text(text, encoding="utf-8")
     print(f"\nScorecard + per-trade CSVs -> {OUT}")
 
 
