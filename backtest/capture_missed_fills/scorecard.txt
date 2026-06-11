@@ -1,0 +1,48 @@
+CAPTURE MISSED FILLS — residual EV after the market repriced?
+(read-only; strict 10s GTC fill model; chase at timeout ask + 7.2% fee)
+
+========================================================================
+Bot K (SM confirmation)  [bot_k_sm_confirmation]
+------------------------------------------------------------------------
+  covered trades: 2008 (of 3470 resolved)   maker fills: 917  misses: 1091  chase-priceable misses: 1091
+  missed win%: 0.620   avg chase premium (ask moved): +0.0740
+
+  -- policies (per-share PnL, real resolutions, day-clustered t) --
+    [maker-only (status quo)   ] N=  917  win%=0.545  EV/sh=+0.1042  total=+95.5  day-t=3.39 (16/20+)
+    [chase if premium<=0.00    ] N= 1096  win%=0.541  EV/sh=+0.0971  total=+106.4  day-t=3.16 (16/20+)
+    [chase if premium<=0.01    ] N= 1123  win%=0.538  EV/sh=+0.0938  total=+105.3  day-t=3.02 (16/20+)
+    [chase if premium<=0.02    ] N= 1212  win%=0.541  EV/sh=+0.0949  total=+115.0  day-t=3.13 (17/20+)
+    [chase if premium<=0.03    ] N= 1298  win%=0.547  EV/sh=+0.0980  total=+127.2  day-t=3.39 (17/20+)
+    [chase if premium<=0.05    ] N= 1420  win%=0.554  EV/sh=+0.0985  total=+139.9  day-t=3.44 (16/20+)
+    [unconditional chase       ] N= 2008  win%=0.586  EV/sh=+0.0884  total=+177.5  day-t=3.43 (15/20+)
+
+  -- the chased subset alone (incremental on top of maker fills) --
+    cap=0.00: n=  179  win%=0.520  EV/sh=+0.0607  total=+10.9
+    cap=0.01: n=  206  win%=0.505  EV/sh=+0.0474  total=+9.8
+    cap=0.02: n=  295  win%=0.529  EV/sh=+0.0660  total=+19.5
+    cap=0.03: n=  381  win%=0.551  EV/sh=+0.0831  total=+31.7
+    cap=0.05: n=  503  win%=0.569  EV/sh=+0.0882  total=+44.3
+    cap=inf : n= 1091  win%=0.620  EV/sh=+0.0751  total=+82.0
+
+========================================================================
+Bot K2 (L1 floor)  [bot_k2_l1_floor]
+------------------------------------------------------------------------
+  covered trades: 952 (of 1425 resolved)   maker fills: 473  misses: 479  chase-priceable misses: 479
+  missed win%: 0.666   avg chase premium (ask moved): +0.0906
+
+  -- policies (per-share PnL, real resolutions, day-clustered t) --
+    [maker-only (status quo)   ] N=  473  win%=0.554  EV/sh=+0.0849  total=+40.2  day-t=2.03 (9/10+)
+    [chase if premium<=0.00    ] N=  537  win%=0.566  EV/sh=+0.0950  total=+51.0  day-t=2.55 (9/10+)
+    [chase if premium<=0.01    ] N=  541  win%=0.566  EV/sh=+0.0944  total=+51.1  day-t=2.52 (8/10+)
+    [chase if premium<=0.02    ] N=  572  win%=0.566  EV/sh=+0.0945  total=+54.1  day-t=2.64 (9/10+)
+    [chase if premium<=0.03    ] N=  610  win%=0.566  EV/sh=+0.0914  total=+55.8  day-t=3.08 (9/10+)
+    [chase if premium<=0.05    ] N=  664  win%=0.571  EV/sh=+0.0909  total=+60.4  day-t=3.29 (9/10+)
+    [unconditional chase       ] N=  952  win%=0.610  EV/sh=+0.0855  total=+81.4  day-t=3.11 (9/10+)
+
+  -- the chased subset alone (incremental on top of maker fills) --
+    cap=0.00: n=   64  win%=0.656  EV/sh=+0.1696  total=+10.9
+    cap=0.01: n=   68  win%=0.647  EV/sh=+0.1609  total=+10.9
+    cap=0.02: n=   99  win%=0.626  EV/sh=+0.1406  total=+13.9
+    cap=0.03: n=  137  win%=0.606  EV/sh=+0.1139  total=+15.6
+    cap=0.05: n=  191  win%=0.613  EV/sh=+0.1059  total=+20.2
+    cap=inf : n=  479  win%=0.666  EV/sh=+0.0861  total=+41.3

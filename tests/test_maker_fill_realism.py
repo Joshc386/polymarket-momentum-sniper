@@ -32,3 +32,25 @@ def test_would_fill_price_rising_never_fills():
 def test_taker_fee_formula():
     assert taker_fee(0.50) == pytest.approx(0.072 * 0.25)
     assert taker_fee(0.40) == pytest.approx(0.072 * 0.40 * 0.60)
+
+
+# --- capture-missed-fills chase model --------------------------------------- #
+from backtest.capture_missed_fills import capture_pnl, chase_ask_at_timeout
+
+
+def test_capture_pnl_win_and_loss():
+    # win at chase ask 0.55: 1 - 0.55 - fee(0.55)
+    assert capture_pnl(1, 0.55) == pytest.approx(1 - 0.55 - 0.072 * 0.55 * 0.45)
+    # loss: -ask - fee
+    assert capture_pnl(0, 0.55) == pytest.approx(-0.55 - 0.072 * 0.55 * 0.45)
+
+
+def test_chase_ask_is_mid_plus_spread_capped():
+    assert chase_ask_at_timeout(0.50, 0.02) == pytest.approx(0.52)
+    assert chase_ask_at_timeout(0.985, 0.02) == 0.99  # cap
+
+
+def test_capture_pnl_breakeven_intuition():
+    # a 50/50 coin chased at 0.52 + fee must be negative EV
+    ev = 0.5 * capture_pnl(1, 0.52) + 0.5 * capture_pnl(0, 0.52)
+    assert ev < 0
