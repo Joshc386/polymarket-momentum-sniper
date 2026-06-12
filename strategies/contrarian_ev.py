@@ -5,6 +5,7 @@ BotStrategy-compatible class. This is the production strategy that has
 been running in paper trading. No modifications from the original logic.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -353,6 +354,14 @@ class ContrarianEvStrategy:
         )
         self._executor.restore_from_db()
 
+        # Live/paper execution bridge state (ADR-0003). The strategy stack
+        # is sync; live engine calls are async — they run as fire-and-forget
+        # tasks guarded by in-flight flags.
+        self._entry_in_flight = False
+        self._exit_in_flight = False
+        self._entry_task = None
+        self._exit_task = None
+
         # L9: SM Confirmation Layer (optional, off by default)
         sm_cfg = cfg.get("sm_confirmation", {})
         self._sm_enabled = sm_cfg.get("enabled", False)
@@ -674,7 +683,8 @@ class ContrarianEvStrategy:
             if self._regime_params else 1.0
         )
 
-        if ob and self._risk_state.can_trade and not self._has_position:
+        if (ob and self._risk_state.can_trade and not self._has_position
+                and not self._entry_in_flight):
             self._entry_decision = self._entry_logic.evaluate(
                 est_prob_up=self._est_prob_up,
                 yes_best_ask=ob.yes_best_ask,
@@ -717,6 +727,10 @@ class ContrarianEvStrategy:
         elif self._has_position:
             self._entry_decision = EntryDecision(
                 reason="Position held this window"
+            )
+        elif self._entry_in_flight:
+            self._entry_decision = EntryDecision(
+                reason="Entry in flight (GTC round posting)"
             )
         elif not ob:
             self._entry_decision = EntryDecision(reason="No orderbook data")
@@ -962,11 +976,7 @@ class ContrarianEvStrategy:
             self._risk_mgr.btc_distance_stop, exit_price, secs_remaining,
         )
 
-        exit_trade = self._executor.close_position_early(
-            exit_price=exit_price,
-            reason=f"BTC_DISTANCE_STOP_${distance:.0f}",
-        )
-        if exit_trade:
+        def _book(exit_trade) -> None:
             won = exit_trade.pnl is not None and exit_trade.pnl > 0
             self._risk_mgr.record_result(exit_trade.pnl or 0)
             self._last_trade_msg = (
@@ -975,6 +985,10 @@ class ContrarianEvStrategy:
                 f"(BTC moved ${distance:.0f})"
             )
             logger.info(f"[{self.name}] {self._last_trade_msg}")
+
+        self._submit_exit(
+            exit_price, f"BTC_DISTANCE_STOP_${distance:.0f}", _book
+        )
 
     def _check_sm_confirmation(self, snapshot: DataSnapshot) -> None:
         """L9: Check SM wallet flow and exit if SM disagrees.
@@ -1055,11 +1069,7 @@ class ContrarianEvStrategy:
                 return
 
             if sm_decision == SMDecision.EXIT:
-                exit_trade = self._executor.close_position_early(
-                    exit_price=market_price,
-                    reason=f"L9_SM_EXIT_min{current_minute}",
-                )
-                if exit_trade:
+                def _book(exit_trade, current_minute=current_minute) -> None:
                     # Keep _has_position = True to block re-entry
                     won = exit_trade.pnl is not None and exit_trade.pnl > 0
                     self._risk_mgr.record_result(exit_trade.pnl or 0)
@@ -1073,6 +1083,10 @@ class ContrarianEvStrategy:
                         self.name, current_minute, exit_trade.side,
                         exit_trade.pnl or 0,
                     )
+
+                self._submit_exit(
+                    market_price, f"L9_SM_EXIT_min{current_minute}", _book
+                )
         except Exception as e:
             logger.error("[%s] L9 SM check failed: %s", self.name, e, exc_info=True)
 
@@ -1224,7 +1238,7 @@ class ContrarianEvStrategy:
         )
 
         mkt = snapshot.market
-        trade = self._executor.execute_trade(
+        trade = self._submit_entry(
             side=ed.side,
             price=ed.price,
             size_usdc=bet_size,
@@ -1268,6 +1282,8 @@ class ContrarianEvStrategy:
         )
 
         if trade:
+            # Paper path only — a live entry returns None here and books
+            # via _on_entry_done when its GTC round completes.
             self._has_position = True
             self._last_trade_msg = (
                 f">> [PAPER] {trade.side} @ "
@@ -1275,8 +1291,96 @@ class ContrarianEvStrategy:
             )
             logger.info(f"[{self.name}] {self._last_trade_msg}")
 
+    # ── Live/paper execution bridge (ADR-0003) ────────────────────────
+
+    def _submit_entry(self, **kwargs):
+        """Dispatch an entry to the executor.
+
+        Paper: synchronous simulated fill, result returned directly.
+        Live: one GTC round as a fire-and-forget task — returns None now
+        and books any fill in _on_entry_done. The entry-in-flight flag
+        guards against overlapping rounds; clearing it on a miss is what
+        advances the re-post loop.
+        """
+        if self._executor.is_paper:
+            return self._executor.execute_trade(**kwargs)
+        if self._entry_in_flight:
+            return None
+        self._entry_in_flight = True
+        self._entry_task = asyncio.get_running_loop().create_task(
+            self._executor.execute_trade(**kwargs)
+        )
+        self._entry_task.add_done_callback(self._on_entry_done)
+        return None
+
+    def _on_entry_done(self, task) -> None:
+        """Book the outcome of a live GTC round; never raises."""
+        self._entry_in_flight = False
+        try:
+            trade = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("[%s] live entry round died", self.name)
+            return
+        if trade:
+            self._has_position = True
+            self._last_trade_msg = (
+                f">> [LIVE] {trade.side} @ "
+                f"${trade.entry_price:.4f} ${trade.size_usdc:.2f}"
+            )
+            logger.info(f"[{self.name}] {self._last_trade_msg}")
+
+    def _submit_exit(self, exit_price: float, reason: str, on_booked) -> None:
+        """Dispatch an early exit to the executor.
+
+        Paper: synchronous simulated exit. Live: best-effort flatten as a
+        fire-and-forget task; ``on_booked`` fires only on an actual fill.
+        The exit-in-flight flag suppresses overlapping flatten attempts; an
+        unfilled exit clears it, so a persisting stop retries next tick.
+        """
+        if self._executor.is_paper:
+            exit_trade = self._executor.close_position_early(
+                exit_price=exit_price, reason=reason
+            )
+            if exit_trade:
+                on_booked(exit_trade)
+            return
+        if self._exit_in_flight:
+            return
+        self._exit_in_flight = True
+        self._exit_task = asyncio.get_running_loop().create_task(
+            self._executor.close_position_early(
+                exit_price=exit_price, reason=reason
+            )
+        )
+
+        def _done(task) -> None:
+            self._exit_in_flight = False
+            try:
+                exit_trade = task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("[%s] live exit flatten died", self.name)
+                return
+            if exit_trade:
+                on_booked(exit_trade)
+
+        self._exit_task.add_done_callback(_done)
+
     def on_window_end(self, resolution: str) -> None:
         """Resolve pending trade and record result."""
+        # Unreachable in theory (entries stop at the 60s floor, rounds run
+        # <=10s) but loud if it ever happens. Deliberately NOT task.cancel():
+        # the round's own timeout path is what cancels the resting CLOB
+        # order; killing the task would strand it on the book.
+        if self._entry_in_flight:
+            logger.warning(
+                "[%s] window ended with an entry round still in flight -- "
+                "letting it drain (self-cancels within the GTC timeout)",
+                self.name,
+            )
         trade = self._executor.resolve_pending_trade(resolution)
         if trade:
             won = trade.pnl is not None and trade.pnl > 0
