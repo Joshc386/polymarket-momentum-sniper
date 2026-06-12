@@ -198,6 +198,46 @@ def test_best_ask_handles_object_books_and_garbage():
     assert execution_rounds.best_ask(object()) is None
 
 
+def test_partial_fill_before_timeout_becomes_a_real_trade(monkeypatch, tmp_path):
+    """Orphaned-shares hole (ADR-0003): shares matched just before the
+    timeout-cancel are real money in the wallet -- the round must return
+    them as a (partial) fill, not report a miss."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-p"}
+    # Final state query after the cancel: 1.5 of 4 shares were matched.
+    poly.get_order_status.return_value = {
+        "status": "CANCELED", "price": 0.52, "size_matched": 1.5,
+    }
+
+    result = asyncio.run(
+        eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+    )
+
+    assert result == (0.52, 1.5, "ord-p")
+    poly.cancel_order.assert_awaited_once_with("ord-p")
+    rounds = _read_rounds(tmp_path)
+    assert len(rounds) == 1
+    assert rounds[0]["outcome"] == "filled"
+    assert rounds[0]["fill_shares"] == 1.5
+
+
+def test_timeout_with_zero_matched_stays_a_miss(monkeypatch, tmp_path):
+    """The final-state query finding nothing matched keeps the round a
+    normal timeout miss."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-z"}
+    poly.get_order_status.return_value = {
+        "status": "CANCELED", "size_matched": 0,
+    }
+
+    result = asyncio.run(
+        eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+    )
+
+    assert result is None
+    assert _read_rounds(tmp_path)[0]["outcome"] == "timeout"
+
+
 def test_execute_trade_wires_spread_into_round_record(monkeypatch, tmp_path):
     """Entering via the public interface: the strategy's at-entry ob_spread
     lands in the round record (no extra REST call at post time)."""

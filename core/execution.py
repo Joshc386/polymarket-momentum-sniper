@@ -638,6 +638,25 @@ class LiveExecutionEngine:
         # Timeout — cancel the unfilled order
         logger.info(f"GTC order not filled in {self.gtc_timeout_sec}s, cancelling")
         await self.poly.cancel_order(order_id)
+
+        # Orphaned-shares check (ADR-0003): shares matched just before the
+        # cancel are real money in the wallet — query the final state once
+        # and return any partial as a fill rather than reporting a miss.
+        try:
+            final = await self.poly.get_order_status(order_id)
+            if not isinstance(final, dict):
+                final = {}
+            matched = float(final.get("size_matched", 0) or 0)
+        except Exception:
+            matched = 0.0
+        if matched > 0:
+            fill_px = float(final.get("price", price) or price)
+            logger.info(
+                f"GTC partial fill before cancel: {matched:.2f} @ ${fill_px:.4f}"
+            )
+            record("filled", fill_price=fill_px, fill_shares=matched)
+            return (fill_px, matched, order_id)
+
         # <=60s left now -> execute_trade will not route to GTC again, so
         # this was the final round of the re-post loop (the floor stop).
         remaining_now = time_remaining - (time.time() - post_ts)

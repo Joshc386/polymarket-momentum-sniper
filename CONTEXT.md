@@ -111,6 +111,12 @@ regime** (>60s remaining); below the 60s entry floor the bot does not enter.
 - **Hybrid (chase-at-floor)** — candidate policy: free maker re-post rounds,
   then one chase at the 60s floor for whatever is still unfilled. Computable
   from the same T1 telemetry; unmeasured.
+- **Entry in flight** — a live GTC round whose background task is still
+  posting/monitoring. The strategy evaluates no new entries while one is in
+  flight; the flag clearing on a miss is what advances the re-post loop.
+  (Decided 2026-06-12: live entries run as fire-and-forget asyncio tasks so
+  the runner loop, sibling paper bots, and the kill-switch heartbeat never
+  stall on a 10s GTC monitor.)
 
 ### Bots (recording-relevant)
 - **Bot G** (`bot_g_signal_aligned`) — **DECOMMISSIONED / dead** (2026-06-01).
@@ -118,6 +124,24 @@ regime** (>60s remaining); below the 60s entry floor the bot does not enter.
 - **Bot K** (`bot_k_sm_confirmation`) — maker variant, paper. **Go-live
   candidate; NOT frozen** (may still change before/at live deployment).
 - **Bot K2** (`bot_k2_l1_floor`) — Bot K + directional L1 floor, paper A/B.
+- **Bot K shadow** (`bot_k_shadow`, decided 2026-06-12) — config-only paper
+  clone of Bot K, deployed alongside K-live for the T1 probe. Same signals,
+  windows and sizing rules; every K-live vs K-shadow difference is pure
+  execution reality (the paper-vs-live fill gap, measured not modelled).
+
+### Live execution vocabulary (T1 wiring — 2026-06-12)
+- **Execution mode** — per-bot config key (`execution_mode: live | paper`,
+  default paper). The runner refuses to start on live-without-auth or more
+  than one live bot (v1).
+- **Best-effort flatten** — the live early exit's honest contract: an
+  aggressive marketable SELL (cross the bid one tick, partials accepted,
+  bounded price-stepping retries), **backstopped by resolution** — an
+  unfilled exit is not an error; the position rides to window settlement,
+  loudly logged. The ledger records only actual fills at actual prices.
+- **Orphaned shares** — entry shares bought by a partial fill just before a
+  GTC timeout-cancel. Closed (2026-06-12 decision): after the cancel, the
+  final order state is queried once and any size_matched becomes a real
+  recorded trade.
 
 No bot is "frozen" for behaviour right now. The relevant constraint is narrower:
 **a logging/instrumentation change must not alter any entry/sizing/filter
