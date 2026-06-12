@@ -554,6 +554,7 @@ async def main():
             initial_bankroll=config.initial_bankroll,
             fok_slippage=config.fok_slippage,
             gtc_timeout_sec=config.gtc_timeout_sec,
+            bot_id="main",
         )
 
         # Sync bankroll from on-chain balance

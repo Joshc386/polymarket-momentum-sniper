@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from core.execution_rounds import best_ask, log_round
 from core.kill_switch_io import halt_active
 from logging_db.database import Database
 from strategy.feature_snapshot import fee_per_share
@@ -428,12 +429,14 @@ class LiveExecutionEngine:
         initial_bankroll: float = 100.0,
         fok_slippage: float = 0.005,
         gtc_timeout_sec: int = 10,
+        bot_id: str = "",
     ):
         self.db = db
         self.poly = poly_client
         self.bankroll = initial_bankroll
         self.fok_slippage = fok_slippage
         self.gtc_timeout_sec = gtc_timeout_sec
+        self.bot_id = bot_id
         self.pending_trade: TradeRecord | None = None
         self.pending_trade_time: float = 0.0
         self.pending_order_id: str | None = None
@@ -442,6 +445,9 @@ class LiveExecutionEngine:
         self.session_losses = 0
         self.session_pnl = 0.0
         self.is_paper = False
+        # J27 telemetry: GTC re-post round counter (per token).
+        self._gtc_round_token: str = ""
+        self._gtc_round_num: int = 0
 
     async def execute_trade(
         self,
@@ -502,7 +508,8 @@ class LiveExecutionEngine:
         # Choose order type based on time remaining
         if time_remaining_secs > 60:
             fill_result = await self._execute_gtc(
-                token_id, price, size_usdc, time_remaining_secs
+                token_id, price, size_usdc, time_remaining_secs,
+                spread=ob_spread,
             )
         else:
             fill_result = await self._execute_fok(
@@ -552,14 +559,39 @@ class LiveExecutionEngine:
 
     async def _execute_gtc(
         self, token_id: str, price: float, size_usdc: float,
-        time_remaining: float,
+        time_remaining: float, spread: float = 0.0,
     ) -> tuple[float, float, str] | None:
         """Place a GTC limit order and wait for fill.
 
         Cancel and return None if not filled within gtc_timeout_sec.
         Returns (fill_price, num_shares, order_id) or None.
+
+        One call = one posting round of the re-post loop; each call appends
+        one J27 telemetry record to the execution_rounds sink.
         """
         num_shares = size_usdc / price
+
+        # J27: round # within the re-post loop (same token = next round).
+        if token_id == self._gtc_round_token:
+            self._gtc_round_num += 1
+        else:
+            self._gtc_round_token = token_id
+            self._gtc_round_num = 1
+        post_ts = time.time()
+        round_rec = {
+            "bot_id": self.bot_id,
+            "token_id": token_id,
+            "round": self._gtc_round_num,
+            "post_ts": post_ts,
+            "posted_bid": price,
+            "shares": num_shares,
+            "spread": spread,
+            "time_remaining_at_post": time_remaining,
+        }
+
+        def record(outcome: str, **extra) -> None:
+            log_round({**round_rec, "outcome": outcome,
+                       "fill_price": None, "fill_shares": None, **extra})
 
         resp = await self.poly.place_order(
             token_id=token_id,
@@ -570,12 +602,15 @@ class LiveExecutionEngine:
         )
 
         if not resp:
+            record("post_failed")
             return None
 
         order_id = resp.get("orderID", resp.get("id", ""))
         if not order_id:
             logger.warning("GTC order placed but no order ID returned")
+            record("post_failed")
             return None
+        round_rec["order_id"] = order_id
 
         # Monitor for fill
         deadline = time.time() + self.gtc_timeout_sec
@@ -592,15 +627,28 @@ class LiveExecutionEngine:
                 fill_px = float(status.get("price", price))
                 fill_sz = float(status.get("size_matched", num_shares))
                 logger.info(f"GTC order filled: {fill_sz:.2f} @ ${fill_px:.4f}")
+                record("filled", fill_price=fill_px, fill_shares=fill_sz)
                 return (fill_px, fill_sz, order_id)
 
             if order_status in ("CANCELED", "CANCELLED", "EXPIRED"):
                 logger.info(f"GTC order {order_status}")
+                record("cancelled")
                 return None
 
         # Timeout — cancel the unfilled order
         logger.info(f"GTC order not filled in {self.gtc_timeout_sec}s, cancelling")
         await self.poly.cancel_order(order_id)
+        # <=60s left now -> execute_trade will not route to GTC again, so
+        # this was the final round of the re-post loop (the floor stop).
+        remaining_now = time_remaining - (time.time() - post_ts)
+        try:
+            chase_ask = best_ask(self.poly.get_orderbook(token_id))
+        except Exception:  # telemetry must never break order flow
+            chase_ask = None
+        record(
+            "timeout_floor" if remaining_now <= 60.0 else "timeout",
+            best_ask_at_timeout=chase_ask,
+        )
         return None
 
     async def _execute_fok(
