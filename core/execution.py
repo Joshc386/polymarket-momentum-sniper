@@ -7,10 +7,10 @@ so main.py can swap between them based on config.mode.
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
-from core.execution_rounds import best_ask, log_round
+from core.execution_rounds import best_ask, best_bid, log_round
 from core.kill_switch_io import halt_active
 from logging_db.database import Database
 from strategy.feature_snapshot import fee_per_share
@@ -440,6 +440,7 @@ class LiveExecutionEngine:
         self.pending_trade: TradeRecord | None = None
         self.pending_trade_time: float = 0.0
         self.pending_order_id: str | None = None
+        self.pending_token_id: str | None = None
         self.session_trades: list[TradeRecord] = []
         self.session_wins = 0
         self.session_losses = 0
@@ -549,6 +550,7 @@ class LiveExecutionEngine:
         self.pending_trade = trade
         self.pending_trade_time = time.time()
         self.pending_order_id = order_id
+        self.pending_token_id = token_id  # held token, needed to SELL
 
         logger.info(
             f"[LIVE] {side} @ ${fill_price:.4f} | "
@@ -751,22 +753,28 @@ class LiveExecutionEngine:
         )
         return trade
 
-    def close_position_early(
+    # Best-effort flatten parameters (ADR-0003). One tick under the bid is
+    # marketable against the resting bid even if the book moved slightly.
+    EXIT_TICK = 0.01
+    EXIT_PRICE_FLOOR = 0.01
+    EXIT_MAX_ATTEMPTS = 3
+    EXIT_FILL_WAIT_SECS = 1.0
+    EXIT_DUST_SHARES = 0.01   # remainders at/below this count as flat
+
+    async def close_position_early(
         self, exit_price: float, reason: str = ""
     ) -> TradeRecord | None:
-        """Close pending position before resolution (paper simulation).
+        """Best-effort flatten of the pending position (ADR-0003).
 
-        For live trading, this would need to place a SELL order on the
-        CLOB. For now, it simulates the exit at the given price — same
-        as the paper engine. A proper live implementation would call
-        self.poly.place_order(side="SELL", ...) and wait for fill.
+        Places an aggressive marketable SELL one tick under the best bid,
+        accepts partial fills, retries stepping the price down, and is
+        backstopped by resolution: whatever cannot be sold stays pending
+        and settles at window end. The ledger records only actual fills at
+        actual prices.
 
-        Args:
-            exit_price: Bid price we're selling at.
-            reason: Why we're exiting early.
-
-        Returns:
-            Resolved TradeRecord with PnL, or None if no position.
+        Returns the resolved TradeRecord (full exit), the resolved record
+        for the sold portion (partial exit), or None (nothing sold / no
+        position / halted).
         """
         # Kill switch: once HALT is set, defer flattening to the kill switch
         # rather than racing it with the bot's own exit. The position is left
@@ -781,12 +789,117 @@ class LiveExecutionEngine:
         if not trade:
             return None
 
+        token_id = self.pending_token_id
+        if not token_id:
+            logger.error(
+                f"[LIVE] Early exit ({reason}) impossible: no token id for the "
+                "pending position -- riding to resolution"
+            )
+            return None
+
+        # Fresh best bid as the price reference; the strategy's view as backup.
+        try:
+            ref_bid = best_bid(self.poly.get_orderbook(token_id))
+        except Exception:
+            ref_bid = None
+        if not ref_bid:
+            ref_bid = exit_price
+
+        remaining = trade.num_shares
+        sold = 0.0
+        proceeds = 0.0
+        for attempt in range(self.EXIT_MAX_ATTEMPTS):
+            px = max(
+                ref_bid - (attempt + 1) * self.EXIT_TICK,
+                self.EXIT_PRICE_FLOOR,
+            )
+            resp = await self.poly.place_order(
+                token_id=token_id, side="SELL", price=px,
+                size=remaining, order_type="GTC",
+            )
+            order_id = (resp or {}).get("orderID", (resp or {}).get("id", ""))
+            if not order_id:
+                continue
+
+            await asyncio.sleep(self.EXIT_FILL_WAIT_SECS)
+            status = await self.poly.get_order_status(order_id)
+            state = ""
+            if isinstance(status, dict):
+                state = str(status.get("status", "")).upper()
+            if state not in ("MATCHED", "FILLED"):
+                # Cancel the remainder, then trust the FINAL state for what
+                # matched before the cancel landed (same orphan-shares rule
+                # as entries).
+                await self.poly.cancel_order(order_id)
+                status = await self.poly.get_order_status(order_id)
+
+            matched, fill_px = 0.0, px
+            if isinstance(status, dict):
+                try:
+                    matched = float(status.get("size_matched", 0) or 0)
+                    fill_px = float(status.get("price", px) or px)
+                except (TypeError, ValueError):
+                    matched = 0.0
+            matched = min(matched, remaining)
+            if matched > 0:
+                sold += matched
+                proceeds += fill_px * matched
+                remaining -= matched
+            if remaining <= self.EXIT_DUST_SHARES:
+                break
+
+        if sold <= 0:
+            logger.warning(
+                f"[LIVE] Early exit ({reason}) UNFILLED after "
+                f"{self.EXIT_MAX_ATTEMPTS} attempts -- position rides to "
+                f"resolution ({trade.side} {trade.num_shares:.2f} shares)"
+            )
+            return None
+
+        if remaining <= self.EXIT_DUST_SHARES:
+            # Full exit at the blended ACTUAL price.
+            return self._book_early_exit(trade, sold, proceeds, reason)
+
+        # Partial exit: split the record. The sold portion books now at the
+        # actual blended price; the remainder stays pending and resolves at
+        # settlement (proportional cost basis and entry fee).
+        logger.warning(
+            f"[LIVE] Early exit ({reason}) PARTIAL: sold {sold:.2f}, "
+            f"{remaining:.2f} shares ride to resolution"
+        )
+        sold_part = replace(
+            trade,
+            num_shares=sold,
+            size_usdc=trade.entry_price * sold,
+        )
+        sold_part.order_id = trade.order_id
+        sold_part.db_id = _log_to_db(self.db, sold_part, is_paper=False)
+        booked = self._book_early_exit(sold_part, sold, proceeds, reason)
+
+        trade.num_shares = remaining
+        trade.size_usdc = trade.entry_price * remaining
+        if trade.db_id and self.db.conn:
+            self.db.conn.execute(
+                "UPDATE trades SET num_shares = ?, size_usdc = ? WHERE id = ?",
+                (trade.num_shares, trade.size_usdc, trade.db_id),
+            )
+            self.db.conn.commit()
+        return booked
+
+    def _book_early_exit(
+        self, trade: TradeRecord, sold: float, proceeds: float, reason: str
+    ) -> TradeRecord:
+        """Book an early-exit fill into the ledger at the actual prices.
+
+        ``trade`` must already carry the sold size (num_shares == sold for a
+        full exit; the cloned sold-portion record for a partial).
+        """
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
-        # Single entry fee charged at position open (p = entry price).
-        gross_pnl = (exit_price - trade.entry_price) * trade.num_shares
-        entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+        # Entry fee on the sold shares (charged once, at entry price).
+        gross_pnl = proceeds - trade.entry_price * sold
+        entry_fee = fee_per_share(trade.entry_price) * sold
         trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
@@ -807,12 +920,17 @@ class LiveExecutionEngine:
             )
             self.db.conn.commit()
 
-        self.pending_trade = None
-        self.pending_order_id = None
+        # Full exit clears the pending slot; the partial-split caller passes
+        # a clone, so its reduced remainder stays pending.
+        if self.pending_trade is trade:
+            self.pending_trade = None
+            self.pending_order_id = None
+            self.pending_token_id = None
 
+        avg_px = proceeds / sold if sold else 0.0
         logger.info(
             f"[LIVE] Early exit ({reason}) | {trade.side} @ "
-            f"${trade.entry_price:.4f} -> ${exit_price:.4f} | "
+            f"${trade.entry_price:.4f} -> ${avg_px:.4f} x {sold:.2f} | "
             f"{'WIN' if won else 'LOSS'} | P&L: ${trade.pnl:+.2f} | "
             f"Bankroll: ${self.bankroll:.2f}"
         )

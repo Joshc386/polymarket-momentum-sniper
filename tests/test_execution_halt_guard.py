@@ -56,11 +56,14 @@ def test_execute_trade_proceeds_when_not_halted():
 
 
 def test_close_position_early_blocked_when_halted():
-    eng, _ = _engine()
+    eng, poly = _engine()
     sentinel = MagicMock()  # stand-in pending trade
     eng.pending_trade = sentinel
+    eng.pending_token_id = "0xTOK"
     with patch("core.execution.halt_active", return_value=True):
-        out = eng.close_position_early(exit_price=0.6, reason="stop")
+        out = asyncio.run(eng.close_position_early(exit_price=0.6, reason="stop"))
     assert out is None
-    # Deferred to the kill switch — the bot did not touch its position.
+    # Deferred to the kill switch — the bot did not touch its position,
+    # and placed no SELL.
     assert eng.pending_trade is sentinel
+    poly.place_order.assert_not_called()

@@ -15,6 +15,9 @@ regression tests so the correct money math can't silently drift. See
 decisions_BTC J17.
 """
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from core.execution import (
@@ -106,10 +109,23 @@ class TestEarlyExitFee:
         assert result.pnl == pytest.approx(8.32)
 
     def test_live_early_exit_charges_entry_fee(self) -> None:
-        eng = LiveExecutionEngine(db=Database(":memory:"), poly_client=None)
+        # Live exit is a REAL flatten now (ADR-0003): mock a CLOB client
+        # whose SELL fills in full at the requested 0.45. The fee contract
+        # is unchanged: entry fee on the sold shares, charged once.
+        poly = MagicMock()
+        poly.get_orderbook = MagicMock(return_value=None)  # -> exit_price ref
+        poly.place_order = AsyncMock(return_value={"orderID": "ord-fee"})
+        poly.get_order_status = AsyncMock(return_value={
+            "status": "MATCHED", "price": 0.45, "size_matched": 100,
+        })
+        eng = LiveExecutionEngine(db=Database(":memory:"), poly_client=poly)
         trade = _make_trade("YES", 0.40, 100)
         trade.db_id = None
         eng.pending_trade = trade
-        result = eng.close_position_early(exit_price=0.45, reason="t")
+        eng.pending_token_id = "0xTOK"
+        with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(
+                eng.close_position_early(exit_price=0.45, reason="t")
+            )
         # gross = (0.45-0.40)*100 = 5; fee = 1.68 -> pnl = 3.32
         assert result.pnl == pytest.approx(3.32)

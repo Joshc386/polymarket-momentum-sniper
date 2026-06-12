@@ -29,24 +29,32 @@ def log_round(record: dict, *, path: Path | None = None) -> None:
         logger.error(f"execution_rounds write failed: {e}")
 
 
-def best_ask(book: object) -> float | None:
-    """Extract the lowest ask price from an orderbook.
+def _level_prices(book: object, side: str) -> list[float]:
+    """Prices on one side of an orderbook. Handles both the raw CLOB REST
+    dict (``{"asks": [{"price","size"}]}``) and a py-clob-client
+    ``OrderBookSummary`` object (``.asks`` of objects with ``.price``)."""
+    levels = book.get(side) if isinstance(book, dict) else getattr(book, side, None)
+    prices = []
+    for level in levels or []:
+        raw = level.get("price") if isinstance(level, dict) else getattr(level, "price", None)
+        if raw is not None:
+            prices.append(float(raw))
+    return prices
 
-    Handles both the raw CLOB REST dict (``{"asks": [{"price","size"}]}``)
-    and a py-clob-client ``OrderBookSummary`` object (``.asks`` of objects
-    with ``.price``). Returns None when unavailable — never raises.
-    """
+
+def best_ask(book: object) -> float | None:
+    """Lowest ask price, or None when unavailable — never raises."""
     try:
-        if book is None:
-            return None
-        asks = book.get("asks") if isinstance(book, dict) else getattr(book, "asks", None)
-        if not asks:
-            return None
-        prices = []
-        for level in asks:
-            raw = level.get("price") if isinstance(level, dict) else getattr(level, "price", None)
-            if raw is not None:
-                prices.append(float(raw))
+        prices = _level_prices(book, "asks") if book is not None else []
         return min(prices) if prices else None
+    except Exception:
+        return None
+
+
+def best_bid(book: object) -> float | None:
+    """Highest bid price, or None when unavailable — never raises."""
+    try:
+        prices = _level_prices(book, "bids") if book is not None else []
+        return max(prices) if prices else None
     except Exception:
         return None
