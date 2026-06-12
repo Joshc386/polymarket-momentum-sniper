@@ -32,6 +32,7 @@ if sys.platform == "win32":
 from core.event_loop import setup_event_loop
 setup_event_loop()
 
+from core.live_mode import live_bot_names, validate_live_fleet
 from core.polymarket_client import PolymarketClient
 from core.kill_switch_io import halt_active, write_heartbeat
 from core.market_discovery import MarketDiscovery
@@ -256,6 +257,20 @@ async def main() -> None:
         wallet_flow_monitor = WalletFlowMonitor()
         logger.info("Shared wallet flow monitor created for L12 signal")
 
+    # ── Live-fleet guards (ADR-0003) ──────────────────────────────────
+    # Refuse to start on live-without-auth (no silent paper fallback) or
+    # more than one live bot (v1).
+    fleet_error = validate_live_fleet(bots_cfg, poly_client.is_authenticated)
+    if fleet_error:
+        logger.error(f"FATAL: {fleet_error}")
+        return
+    live_bots = live_bot_names(bots_cfg)
+    if live_bots:
+        logger.warning(
+            f">>> LIVE MODE for {live_bots[0]} — real money at risk <<<"
+        )
+        await poly_client.check_and_set_allowance()
+
     # ── Instantiate bots ──────────────────────────────────────────────
     bots = []
     for bot_name, bot_cfg in bots_cfg.items():
@@ -272,6 +287,9 @@ async def main() -> None:
         # Inject shared wallet flow monitor for bots with L12 enabled
         if wallet_flow_monitor and bot_cfg.get("signals", {}).get("wallet_flow_weight", 0.0) > 0:
             bot_cfg["_wallet_flow_monitor"] = wallet_flow_monitor
+        # Inject the shared authenticated CLOB client for the live bot
+        if bot_cfg.get("execution_mode", "paper") == "live":
+            bot_cfg["_poly_client"] = poly_client
         try:
             bot = create_bot(name=bot_name, strategy_name=strategy_name, cfg=bot_cfg)
             bots.append(bot)
@@ -283,10 +301,21 @@ async def main() -> None:
         logger.error("No bots configured. Check config_multi.yaml")
         return
 
+    # Live startup bankroll sync — sizing reads the real wallet (ADR-0003).
+    for bot in bots:
+        executor = getattr(bot, "_executor", None)
+        if executor is not None and not executor.is_paper:
+            await executor.sync_bankroll()
+            logger.info(
+                f"[{bot.name}] live bankroll synced from wallet: "
+                f"${executor.bankroll:.2f}"
+            )
+
+    fleet_mode = f"LIVE: {live_bots[0]}" if live_bots else "paper"
     logger.info(f"Running {len(bots)} bot(s): {[b.name for b in bots]}")
     await telegram.notify_bot_event(
         "Multi-Bot Started",
-        f"Bots: {', '.join(b.name for b in bots)} | Mode: paper",
+        f"Bots: {', '.join(b.name for b in bots)} | Mode: {fleet_mode}",
     )
 
     # ── Shutdown handler ──────────────────────────────────────────────

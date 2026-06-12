@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from core.bot_strategy import BotStrategy
 from core.data_snapshot import DataSnapshot
-from core.execution import PaperExecutionEngine
+from core.execution import LiveExecutionEngine, PaperExecutionEngine
 from logging_db.database import Database
 from signals.oracle_lag import OracleLagSignal
 from signals.momentum import MomentumSignal
@@ -345,14 +345,36 @@ class ContrarianEvStrategy:
                 sample_every_n=diag_cfg.get("sample_every_n", 1),
             )
 
-        # Execution engine (independent bankroll + trade history)
-        self._executor = PaperExecutionEngine(
-            db=self._db,
-            initial_bankroll=sizing_cfg.get("initial_bankroll", 100.0),
-            slippage=entry_cfg.get("fok_slippage", 0.005),
-            bankroll_epoch=sizing_cfg.get("bankroll_epoch"),
-        )
-        self._executor.restore_from_db()
+        # Execution engine (independent bankroll + trade history).
+        # execution_mode: live routes to the real CLOB engine (ADR-0003);
+        # default paper. The shared authenticated client is injected by
+        # multi_runner as _poly_client (same pattern as _sm_monitor).
+        if cfg.get("execution_mode", "paper") == "live":
+            poly_client = cfg.get("_poly_client")
+            if poly_client is None:
+                raise ValueError(
+                    f"{name}: execution_mode is 'live' but no _poly_client "
+                    "was injected — refusing to construct"
+                )
+            self._executor = LiveExecutionEngine(
+                db=self._db,
+                poly_client=poly_client,
+                initial_bankroll=sizing_cfg.get("initial_bankroll", 100.0),
+                fok_slippage=entry_cfg.get("fok_slippage", 0.005),
+                gtc_timeout_sec=entry_cfg.get("gtc_timeout_sec", 10),
+                bot_id=name,
+            )
+            logger.warning(
+                "[%s] LIVE execution engine — real money at risk", name
+            )
+        else:
+            self._executor = PaperExecutionEngine(
+                db=self._db,
+                initial_bankroll=sizing_cfg.get("initial_bankroll", 100.0),
+                slippage=entry_cfg.get("fok_slippage", 0.005),
+                bankroll_epoch=sizing_cfg.get("bankroll_epoch"),
+            )
+            self._executor.restore_from_db()
 
         # Live/paper execution bridge state (ADR-0003). The strategy stack
         # is sync; live engine calls are async — they run as fire-and-forget
@@ -1392,6 +1414,13 @@ class ContrarianEvStrategy:
             )
             logger.info(f"[{self.name}] {self._last_trade_msg}")
         self._equity_curve.append(self._executor.bankroll)
+        # Live: re-sync the bankroll from the wallet after settlement so the
+        # next window's sizing reads reality (grilled: startup + window end;
+        # settlement lag only ever under-sizes).
+        if not self._executor.is_paper:
+            asyncio.get_running_loop().create_task(
+                self._executor.sync_bankroll()
+            )
 
     def get_dashboard_state(self) -> dict:
         """Return state dict for the multi-bot dashboard."""

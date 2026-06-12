@@ -514,6 +514,10 @@ bots:
     enabled: true
     db_path: ./data_runtime/bot_k_sm_confirmation.db
     weekend_flip: true
+    # T1 probe (ADR-0003): flip to "live" ONLY after the pre-live CSO
+    # re-run and the go/no-go grill. Startup guards: requires CLOB auth
+    # in .env; at most one live bot in the fleet.
+    execution_mode: paper
 
     # Per-tick signal diagnostic logger (2026-05-13). Captures every tick's
     # full signal state. Both Bot G and Bot K log so we can compare the
@@ -753,6 +757,106 @@ bots:
       high_volatility_threshold: 0.02
       high_volatility_size_factor: 0.5
       # Tightened 100→90 on 2026-06-11, identical to Bot K (A/B fairness).
+      btc_distance_stop: 90.0
+      btc_distance_min_secs_remaining: 60.0
+      drawdown_pct: 0.30
+      daily_trade_cap: 150
+      regime_size_overrides:
+        ranging: 1.5
+        trending_up: 0.75
+
+  # -- Bot K shadow: paper twin of Bot K for the T1 probe (2026-06-12) --
+  # Config-identical to bot_k_sm_confirmation (paper, own DB) so that when
+  # Bot K flips live, every K-live vs K-shadow difference on the same
+  # windows is pure execution reality — the paper-vs-live fill gap,
+  # measured rather than modelled (ADR-0003). Also keeps the K2 floor A/B
+  # a like-for-like paper comparison. Differences from Bot K: db_path,
+  # signal_diagnostic off (Bot K already captures the per-tick stream;
+  # the trade records carry full feature snapshots regardless), and a
+  # fresh bankroll epoch (its own DB starts empty at $100).
+  bot_k_shadow:
+    strategy: contrarian_ev
+    enabled: true
+    db_path: ./data_runtime/bot_k_shadow.db
+    weekend_flip: true
+    execution_mode: paper
+
+    signal_diagnostic:
+      enabled: false
+
+    sm_confirmation:
+      enabled: false
+
+    filters:
+      yes_min_price: 0.40
+      skip_regimes: [trending_down]
+      high_ev_threshold: 0.15
+      high_ev_min_secs_into_window: 60.0
+
+    regime:
+      detector: mtf
+      trend_threshold: 0.30
+      high_vol_percentile: 0.90
+      low_vol_percentile: 0.20
+      alignment_weight: 0.55
+      stickiness: 3
+      allowed_regimes: [trending_up, trending_down, ranging, high_vol]
+      block_regimes: [low_vol]
+
+    signals:
+      weight_schedule: bot_k_optimised
+      use_ranging_override: false
+      oracle_lag:
+        max_expected_lag: 0.001
+      momentum:
+        roc_weight: 0.30
+        direction_weight: 0.25
+        volume_weight: 0.25
+        body_ratio_weight: 0.10
+        rsi_weight: 0.10
+        rsi_period: 5
+        lookback_candles: 10
+      max_adjustment: 0.195
+      taker_ratio_weight: 0.131
+      absorption_weight: 0.05
+      exhaustion_weight: 0.05
+      trade_size_weight: 0.05
+      wallet_flow_weight: 0.05
+      directional_signal_gating: true
+      gate_threshold: 0.4
+
+    entry:
+      min_edge: 0.003
+      max_edge: 0.025
+      fee_adjustment: 0.02
+      min_confidence: 0.02
+      preferred_entry_secs: 180
+      latest_entry_secs: 60
+      earliest_entry_secs: 270
+      fok_slippage: 0.005
+
+    sizing:
+      kelly_multiplier: 0.25
+      min_bet_usdc: 1.0
+      max_bet_usdc: 5.0
+      initial_bankroll: 100.0
+      wallet_proportional: true
+      floor_pct: 0.01
+      ceiling_pct: 0.05
+      wallet_cap_usdc: 200.0
+      bankroll_epoch: "2026-06-12T19:00:00+00:00"
+
+    risk:
+      daily_loss_cap_pct: 0.20
+      daily_loss_warn_pct: 0.15
+      min_bankroll: 10.0
+      streak_reduction_enabled: false
+      streak_pause_at: 7
+      streak_pause_minutes: 30
+      streak_reset_wins: 3
+      low_volatility_threshold: 0.0001
+      high_volatility_threshold: 0.02
+      high_volatility_size_factor: 0.5
       btc_distance_stop: 90.0
       btc_distance_min_secs_remaining: 60.0
       drawdown_pct: 0.30
