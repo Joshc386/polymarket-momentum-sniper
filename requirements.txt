@@ -4,3 +4,8 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 py-clob-client>=0.34.6
 numpy>=1.24.0
+orjson>=3.10.0
+winloop>=0.6.0; sys_platform == 'win32'
+# Constraint only: eth-account's ">=4.0.0-b.2" floor lets pip pick betas;
+# hold the signing tree to stable releases.
+eth-abi<6
