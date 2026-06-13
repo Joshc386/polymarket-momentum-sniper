@@ -7,7 +7,6 @@ and error handling.
 
 import asyncio
 import logging
-from enum import Enum
 
 import httpx
 
@@ -16,21 +15,32 @@ from core.rate_limiter import TokenBucketRateLimiter, public_limiter, trading_li
 
 logger = logging.getLogger(__name__)
 
-# py-clob-client lives only in the deployment venv; guard the imports so the
-# module (and its tests) load on the system interpreter too. Orders require
-# OrderArgs objects (NOT dicts) and an OrderType enum for post_order, and
-# balance queries require the params-object form (all verified live 2026-06-12).
-# NOTE: do NOT import py-clob-client's OrderType here — this module defines
-# its own `class OrderType(Enum)` below which would shadow it (and that enum
-# is not JSON-serializable). post_order takes the order-type STRING, which is
-# exactly what py-clob-client's own OrderType members are.
+# py-clob-client-v2 (CLOB V2) lives only in the deployment venv; guard the
+# imports so the module (and its tests) load on the system interpreter too.
+# V2 places an order with a SINGLE call, create_and_post_order(order_args,
+# options, order_type): order_args must be an OrderArgs OBJECT (not a dict),
+# side is the Side enum (BUY=0/SELL=1), and order_type is passed as the plain
+# string "GTC"/"FOK"/... (v2's OrderType members ARE those strings, so the
+# request body stays JSON-serializable). Cancellation takes an OrderPayload
+# object, and balance queries take the params-object form. See ADR on the
+# CLOB V2 migration (2026-06-13).
 try:
-    from py_clob_client.clob_types import BalanceAllowanceParams, OrderArgs
-    from py_clob_client.order_builder.constants import BUY, SELL
+    from py_clob_client_v2 import (
+        AssetType,
+        BalanceAllowanceParams,
+        OrderArgs,
+        OrderPayload,
+        Side,
+    )
 except ImportError:  # pragma: no cover - present in the live venv
+    AssetType = None
     BalanceAllowanceParams = None
     OrderArgs = None
-    BUY, SELL = "BUY", "SELL"
+    OrderPayload = None
+    Side = None
+
+# Order types accepted by the CLOB (passed as plain strings).
+_VALID_ORDER_TYPES = ("GTC", "FOK", "GTD", "FAK")
 
 # Polymarket CLOB constants
 CLOB_HOST = "https://clob.polymarket.com"
@@ -38,17 +48,6 @@ CHAIN_ID = 137  # Polygon
 
 # Public Data API — account-wide positions ("ground truth"); no auth required.
 DATA_API_HOST = "https://data-api.polymarket.com"
-
-
-class OrderType(Enum):
-    GTC = "GTC"   # Good-til-cancelled
-    FOK = "FOK"   # Fill-or-kill
-    GTD = "GTD"   # Good-til-date
-
-
-class OrderSide(Enum):
-    BUY = "BUY"
-    SELL = "SELL"
 
 
 class PolymarketClient:
@@ -76,21 +75,23 @@ class PolymarketClient:
             return
 
         try:
-            from py_clob_client.client import ClobClient
+            from py_clob_client_v2 import ClobClient
 
             self.client = ClobClient(
-                CLOB_HOST,
-                key=self.config.polymarket_private_key,
+                host=CLOB_HOST,
                 chain_id=CHAIN_ID,
+                key=self.config.polymarket_private_key,
                 signature_type=self.config.polymarket_signature_type,
                 funder=self.config.polymarket_funder_address or None,
             )
-            creds = self.client.create_or_derive_api_creds()
+            creds = self.client.create_or_derive_api_key()
             self.client.set_api_creds(creds)
             self._authenticated = True
-            logger.info("Polymarket CLOB client authenticated")
+            logger.info("Polymarket CLOB V2 client authenticated")
         except ImportError:
-            logger.error("py-clob-client not installed. Run: pip install py-clob-client")
+            logger.error(
+                "py-clob-client-v2 not installed. Run: pip install py-clob-client-v2"
+            )
             self._authenticated = False
         except Exception as e:
             logger.error(f"Polymarket auth failed: {e}")
@@ -147,38 +148,38 @@ class PolymarketClient:
             return None
 
         if OrderArgs is None:
-            logger.error("py-clob-client unavailable — cannot place order")
+            logger.error("py-clob-client-v2 unavailable — cannot place order")
             return None
 
         await self._trading_limiter.acquire()
 
         try:
-            order_side = BUY if side.upper() == "BUY" else SELL
+            order_side = Side.BUY if side.upper() == "BUY" else Side.SELL
 
-            # create_order requires an OrderArgs OBJECT (a dict raises
-            # 'dict has no attribute token_id'); post_order takes the OrderType
-            # enum positionally (there is no order_type kwarg).
+            # V2: build + sign + post in one call. order_args must be an
+            # OrderArgs OBJECT (a dict raises 'dict has no attribute token_id').
             order_args = OrderArgs(
                 token_id=token_id,
                 price=round(price, 2),
                 size=round(size, 2),
                 side=order_side,
             )
-            signed_order = self.client.create_order(order_args)
-            # Pass the order-type STRING positionally. py-clob-client's own
-            # OrderType.GTC/FOK ARE these strings; passing this module's local
-            # OrderType enum instead makes the request body unserializable.
+            # Pass the order-type STRING. v2's OrderType.GTC/FOK members ARE
+            # these strings, so the request body stays JSON-serializable
+            # (the v1 local-enum shadow bug). options omitted: the client
+            # resolves tick size + neg_risk for the token itself.
             order_type_str = (
-                order_type if order_type in ("GTC", "FOK", "GTD", "FAK")
-                else "GTC"
+                order_type if order_type in _VALID_ORDER_TYPES else "GTC"
             )
-            resp = self.client.post_order(signed_order, order_type_str)
+            resp = self.client.create_and_post_order(
+                order_args, order_type=order_type_str
+            )
 
             if resp and isinstance(resp, dict):
                 order_id = resp.get("orderID", resp.get("id", ""))
                 logger.info(
                     f"Order placed: {side} {size:.2f} @ ${price:.4f} "
-                    f"[{order_type}] ID={order_id[:16]}..."
+                    f"[{order_type_str}] ID={str(order_id)[:16]}..."
                 )
                 return resp
             else:
@@ -201,7 +202,9 @@ class PolymarketClient:
         await self._trading_limiter.acquire()
 
         try:
-            resp = self.client.cancel(order_id)
+            # V2: cancel takes an OrderPayload object (v1's bare-string
+            # client.cancel was removed).
+            resp = self.client.cancel_order(OrderPayload(orderID=order_id))
             logger.info(f"Order cancelled: {order_id[:16]}...")
             return True
         except Exception as e:
@@ -242,7 +245,8 @@ class PolymarketClient:
         await self._public_limiter.acquire()
 
         try:
-            resp = self.client.get_orders()
+            # V2 renamed get_orders -> get_open_orders.
+            resp = self.client.get_open_orders()
             if isinstance(resp, list):
                 return resp
             return resp.get("orders", []) if isinstance(resp, dict) else []
@@ -260,7 +264,7 @@ class PolymarketClient:
         await self._public_limiter.acquire()
 
         if BalanceAllowanceParams is None:
-            logger.error("py-clob-client unavailable — cannot query balance")
+            logger.error("py-clob-client-v2 unavailable — cannot query balance")
             return 0.0
 
         try:
