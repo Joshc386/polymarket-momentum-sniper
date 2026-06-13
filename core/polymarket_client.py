@@ -16,6 +16,14 @@ from core.rate_limiter import TokenBucketRateLimiter, public_limiter, trading_li
 
 logger = logging.getLogger(__name__)
 
+# py-clob-client lives only in the deployment venv; guard the import so the
+# module (and its tests) load on the system interpreter too. Balance queries
+# require the params-object form (verified live 2026-06-12).
+try:
+    from py_clob_client.clob_types import BalanceAllowanceParams
+except ImportError:  # pragma: no cover - present in the live venv
+    BalanceAllowanceParams = None
+
 # Polymarket CLOB constants
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137  # Polygon
@@ -236,11 +244,15 @@ class PolymarketClient:
 
         await self._public_limiter.acquire()
 
+        if BalanceAllowanceParams is None:
+            logger.error("py-clob-client unavailable — cannot query balance")
+            return 0.0
+
         try:
-            # py-clob-client doesn't have a direct balance method;
-            # use the Polygon RPC or check via the API
+            # The real client requires the params-object form; a bare
+            # asset_type kwarg raises (verified live 2026-06-12).
             balance_resp = self.client.get_balance_allowance(
-                asset_type="COLLATERAL"  # USDC
+                params=BalanceAllowanceParams(asset_type="COLLATERAL")  # USDC
             )
             if isinstance(balance_resp, dict):
                 balance = float(balance_resp.get("balance", 0))
