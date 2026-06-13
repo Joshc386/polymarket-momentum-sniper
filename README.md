@@ -62,7 +62,7 @@ The lifecycle of one 5-minute window:
    stake.
 6. The **execution engine** places the order (GTC maker order at the touch for
    most entries; see [Execution model](#execution-model)). Paper mode simulates
-   this; live mode uses `py-clob-client`.
+   this; live mode uses `py-clob-client-v2` (CLOB V2).
 7. The position is held to **resolution** (5-minute windows leave little room
    for exits). The result, with a full snapshot of everything the bot saw at
    entry, is written to the bot's trade database.
