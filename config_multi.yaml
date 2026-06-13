@@ -667,6 +667,13 @@ bots:
     enabled: true
     db_path: ./data_runtime/bot_k2_l1_floor.db
     weekend_flip: true
+    # T1 LIVE PROBE (J34, 2026-06-13): K2 is the go-live candidate — it beat
+    # Bot K across the full ~2-week A/B (49.0% vs 43.6% WR). Goes LIVE on the
+    # next `multi_runner.py` restart: needs CLOB auth in .env + VPN connected;
+    # the one-live-bot guard requires Bot K + bot_k2_shadow stay paper. Its DB
+    # keeps the paper history — filter live trades by is_paper=0 for the probe
+    # readout. Rollback = set this back to paper + restart.
+    execution_mode: live
 
     signal_diagnostic:
       enabled: true
@@ -768,19 +775,20 @@ bots:
         ranging: 1.5
         trending_up: 0.75
 
-  # -- Bot K shadow: paper twin of Bot K for the T1 probe (2026-06-12) --
-  # Config-identical to bot_k_sm_confirmation (paper, own DB) so that when
-  # Bot K flips live, every K-live vs K-shadow difference on the same
-  # windows is pure execution reality — the paper-vs-live fill gap,
-  # measured rather than modelled (ADR-0003). Also keeps the K2 floor A/B
-  # a like-for-like paper comparison. Differences from Bot K: db_path,
-  # signal_diagnostic off (Bot K already captures the per-tick stream;
-  # the trade records carry full feature snapshots regardless), and a
-  # fresh bankroll epoch (its own DB starts empty at $100).
-  bot_k_shadow:
+  # -- Bot K2 shadow: paper twin of Bot K2 (the live candidate) for T1 (J34) --
+  # Repointed from the old bot_k_shadow on 2026-06-13 when the live candidate
+  # switched K→K2 (J34). Config-identical to bot_k2_l1_floor (paper, own DB,
+  # INCLUDING the directional L1 floor) so that every K2-live vs K2-shadow
+  # difference on the same windows is pure execution reality — the
+  # paper-vs-live fill gap, measured rather than modelled (ADR-0003). Bot K
+  # (paper) remains the floor-A/B baseline. Differences from Bot K2: db_path,
+  # signal_diagnostic off (Bot K2 already captures the per-tick stream; the
+  # trade records carry full feature snapshots regardless), and a fresh
+  # bankroll epoch (its own new DB starts empty at $100).
+  bot_k2_shadow:
     strategy: contrarian_ev
     enabled: true
-    db_path: ./data_runtime/bot_k_shadow.db
+    db_path: ./data_runtime/bot_k2_shadow.db
     weekend_flip: true
     execution_mode: paper
 
@@ -790,11 +798,16 @@ bots:
     sm_confirmation:
       enabled: false
 
+    # Same filters as Bot K2 — INCLUDING the directional L1 floor. The whole
+    # point of the K2 twin is that the shadow mirrors the live candidate, so
+    # the only K2-live vs K2-shadow difference is execution reality.
     filters:
       yes_min_price: 0.40
       skip_regimes: [trending_down]
       high_ev_threshold: 0.15
       high_ev_min_secs_into_window: 60.0
+      directional_l1_floor: true
+      directional_l1_floor_deadband: 0.1
 
     regime:
       detector: mtf
@@ -848,7 +861,9 @@ bots:
       wallet_cap_usdc: 200.0
       min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
       floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
-      bankroll_epoch: "2026-06-12T19:00:00+00:00"
+      # Fresh epoch for the new bot_k2_shadow.db (starts empty at $100 from the
+      # K2 flip). Safe to leave — a fresh DB has no trades before this anyway.
+      bankroll_epoch: "2026-06-13T00:00:00+00:00"
 
     risk:
       daily_loss_cap_pct: 0.20

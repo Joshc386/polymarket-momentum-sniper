@@ -121,13 +121,17 @@ regime** (>60s remaining); below the 60s entry floor the bot does not enter.
 ### Bots (recording-relevant)
 - **Bot G** (`bot_g_signal_aligned`) — **DECOMMISSIONED / dead** (2026-06-01).
   No longer trading. Historical data retained.
-- **Bot K** (`bot_k_sm_confirmation`) — maker variant, paper. **Go-live
-  candidate; NOT frozen** (may still change before/at live deployment).
-- **Bot K2** (`bot_k2_l1_floor`) — Bot K + directional L1 floor, paper A/B.
-- **Bot K shadow** (`bot_k_shadow`, decided 2026-06-12) — config-only paper
-  clone of Bot K, deployed alongside K-live for the T1 probe. Same signals,
-  windows and sizing rules; every K-live vs K-shadow difference is pure
-  execution reality (the paper-vs-live fill gap, measured not modelled).
+- **Bot K** (`bot_k_sm_confirmation`) — maker variant, paper. Was the go-live
+  candidate; **demoted to the paper floor-A/B baseline (J34, 2026-06-13)** after
+  the full A/B showed K2 outperforming. Stays paper, enabled.
+- **Bot K2** (`bot_k2_l1_floor`) — Bot K + directional L1 floor. **The go-live
+  candidate (decided J34)** — beat K across the full ~2-week A/B (49.0% vs 43.6%
+  WR). The bot Bot K's live record will accrue on.
+- **Bot K shadow** (`bot_k_shadow`) — config-only paper clone of the live
+  candidate, deployed alongside it for the T1 probe so every live-vs-shadow
+  difference is pure execution reality (the paper-vs-live fill gap, measured not
+  modelled). Built 2026-06-12 as a twin of **K**; per J34 it is repointed to a
+  **K2 twin** (`bot_k2_shadow`, adds the directional L1 floor) when K2 flips live.
 
 ### Live execution vocabulary (T1 wiring — 2026-06-12)
 - **Execution mode** — per-bot config key (`execution_mode: live | paper`,
@@ -142,6 +146,19 @@ regime** (>60s remaining); below the 60s entry floor the bot does not enter.
   GTC timeout-cancel. Closed (2026-06-12 decision): after the cancel, the
   final order state is queried once and any size_matched becomes a real
   recorded trade.
+
+### T1 go-live probe (Bot K2) — pass/abort vocabulary (J34)
+The bounded-loss live fill probe. Its job is to *measure the live fill gap
+paper can't simulate* on the cheap-side fade, for a capped tuition.
+- **Loss budget** — the existing 30% drawdown breaker (~−$30 from peak on the
+  ~$100 wallet) is the tuition cap. No separate manual money line.
+- **Duration** — pure calendar: read-out at ~2 weeks, hard end at ~3 weeks.
+- **Success / T2 gate** — K2-**live** filled WR ≥ K2-**shadow** paper WR − 5pp on
+  matched windows, valid only above a **30 filled-trade** floor (else
+  *inconclusive*, not a pass). Live PnL/trade is a sanity flag, not a gate.
+- **Abort triggers** (any → pull K2 to paper, reassess) — adverse-selection
+  signature early, operational integrity breach, near-zero fill rate, live
+  PnL/trade materially below shadow.
 
 No bot is "frozen" for behaviour right now. The relevant constraint is narrower:
 **a logging/instrumentation change must not alter any entry/sizing/filter
