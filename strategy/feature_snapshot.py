@@ -23,15 +23,31 @@ from dataclasses import dataclass, field
 FEE_RATE = 0.07
 
 
+def fee_per_share_v2(price: float, rate: float, exponent: float) -> float:
+    """CLOB V2 taker fee per contract: ``rate * (p*(1-p))**exponent``.
+
+    This is the exact platform-fee-per-share implied by py-clob-client-v2's
+    ``fees.adjust_buy_amount_for_fees`` (platform_fee = (amount/price) *
+    rate * (p*(1-p))**exponent, and amount/price == shares for a buy). The
+    legacy ``fee_per_share`` is this with rate=0.07, exponent=1.
+
+    Used by the LIVE PnL resolvers with the market's live rate/exponent
+    (fetched per window). The entry EV gate and paper PnL keep the validated
+    ``fee_per_share`` (0.07) — see CLOB V2 migration ADR / decisions_BTC.
+    """
+    return rate * (price * (1.0 - price)) ** exponent
+
+
 def fee_per_share(price: float) -> float:
     """Polymarket crypto taker fee per contract: FEE_RATE * p * (1 - p).
 
     Charged once at entry, on every trade regardless of outcome. Peaks at
     p = 0.50 (FEE_RATE * 0.25). Multiply by the number of contracts (shares)
-    for the total position fee. Single source of truth for the fee formula —
-    reused by the EV logging here and the PnL resolvers in core/execution.py.
+    for the total position fee. The validated cost basis for the entry EV
+    gate, EV logging, and paper PnL. Equivalent to fee_per_share_v2(price,
+    FEE_RATE, 1.0).
     """
-    return FEE_RATE * price * (1.0 - price)
+    return fee_per_share_v2(price, FEE_RATE, 1.0)
 
 
 @dataclass(frozen=True)

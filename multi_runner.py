@@ -162,6 +162,28 @@ async def detect_resolution(
     return "DOWN"
 
 
+async def _apply_live_market_fee(bots, poly_client, token_id: str) -> None:
+    """Fetch the market's live CLOB V2 taker fee once per window and apply it
+    to every LIVE executor for recorded PnL (PnL-only — never the EV gate, per
+    the CLOB V2 migration decision).
+
+    No-op when all bots are paper (no fee call made). Best-effort: on a fetch
+    failure the executors keep their current fee rather than mis-pricing.
+    """
+    live = [
+        e for e in (getattr(b, "_executor", None) for b in bots)
+        if e is not None and not e.is_paper
+    ]
+    if not live or not token_id:
+        return
+    fee = await poly_client.get_market_fee(token_id)
+    if not fee:
+        return
+    rate, exponent = fee
+    for e in live:
+        e.set_market_fee(rate, exponent)
+
+
 async def main() -> None:
     """Main entry point for the multi-bot runner."""
     cfg = load_config()
@@ -494,6 +516,11 @@ async def main() -> None:
                             wallet_flow_monitor.set_market(
                                 mkt.yes_token_id, mkt.no_token_id, mkt.slug,
                             )
+                        # Live CLOB V2 taker fee for this window -> live PnL
+                        # (no-op when all bots are paper).
+                        await _apply_live_market_fee(
+                            bots, poly_client, mkt.yes_token_id
+                        )
                     logger.info(
                         f"Startup: observing in-progress window {mkt.slug}, "
                         f"will trade from next window"
@@ -556,6 +583,11 @@ async def main() -> None:
                             wallet_flow_monitor.set_market(
                                 mkt.yes_token_id, mkt.no_token_id, mkt.slug,
                             )
+                        # Live CLOB V2 taker fee for this window -> live PnL
+                        # (no-op when all bots are paper).
+                        await _apply_live_market_fee(
+                            bots, poly_client, mkt.yes_token_id
+                        )
                     # Seed the oracle with the 3-feed aggregated price so the
                     # window open is set immediately (J28 fix — see startup
                     # block above). PolyBackTest refines in the background.

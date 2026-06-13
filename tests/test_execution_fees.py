@@ -56,6 +56,26 @@ class TestFeeRate:
         assert fee_per_share(0.50) == pytest.approx(0.0175)
 
 
+class TestFeeV2:
+    """V2 fee = rate * (p*(1-p))**exponent (py-clob-client-v2 fees.py). The
+    legacy fee_per_share is exactly this with rate=0.07, exponent=1."""
+
+    def test_v2_default_rate_matches_legacy(self) -> None:
+        from strategy.feature_snapshot import fee_per_share_v2
+        assert fee_per_share_v2(0.50, 0.07, 1.0) == pytest.approx(fee_per_share(0.50))
+        assert fee_per_share_v2(0.40, 0.07, 1.0) == pytest.approx(fee_per_share(0.40))
+
+    def test_v2_higher_rate_scales_linearly(self) -> None:
+        from strategy.feature_snapshot import fee_per_share_v2
+        # 0.10 * 0.50 * 0.50 = 0.025/share
+        assert fee_per_share_v2(0.50, 0.10, 1.0) == pytest.approx(0.025)
+
+    def test_v2_exponent_changes_shape(self) -> None:
+        from strategy.feature_snapshot import fee_per_share_v2
+        # 0.10 * (0.25)**2 = 0.00625/share
+        assert fee_per_share_v2(0.50, 0.10, 2.0) == pytest.approx(0.00625)
+
+
 class TestResolveTradeFee:
     """Entry fee charged on every trade; worked $40 / 100-contract example."""
 
@@ -90,6 +110,38 @@ class TestResolveTradeFee:
         trade = _make_trade("YES", 0.50, 100)
         _resolve_trade(trade, "UP")
         assert trade.pnl > 0
+
+
+class TestLiveMarketFeePnL:
+    """Live PnL uses the per-window market fee (set_market_fee); paper and an
+    un-set live engine keep the validated 0.07. Recorded P&L only — the entry
+    EV gate is untouched (CLOB V2 migration decision: PnL-only live fee)."""
+
+    def test_live_resolve_uses_set_market_fee(self) -> None:
+        eng = LiveExecutionEngine(db=Database(":memory:"), poly_client=MagicMock())
+        eng.set_market_fee(0.10, 1.0)
+        trade = _make_trade("YES", 0.40, 100)
+        trade.db_id = None
+        eng.pending_trade = trade
+        eng.resolve_pending_trade("UP")
+        # fee = 0.10*100*0.40*0.60 = 2.40; gross = 60 -> pnl = 57.60
+        assert trade.pnl == pytest.approx(57.60)
+
+    def test_live_resolve_defaults_to_legacy_fee(self) -> None:
+        eng = LiveExecutionEngine(db=Database(":memory:"), poly_client=MagicMock())
+        trade = _make_trade("YES", 0.40, 100)
+        trade.db_id = None
+        eng.pending_trade = trade
+        eng.resolve_pending_trade("UP")
+        assert trade.pnl == pytest.approx(58.32)  # 0.07 until a fee is set
+
+    def test_paper_resolve_keeps_legacy_fee(self) -> None:
+        eng = PaperExecutionEngine(db=Database(":memory:"))
+        trade = _make_trade("YES", 0.40, 100)
+        trade.db_id = None
+        eng.pending_trade = trade
+        eng.resolve_pending_trade("UP")
+        assert trade.pnl == pytest.approx(58.32)
 
 
 class TestEarlyExitFee:

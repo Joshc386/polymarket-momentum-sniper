@@ -254,6 +254,29 @@ class PolymarketClient:
             logger.debug(f"Failed to get open orders: {e}")
             return []
 
+    async def get_market_fee(self, token_id: str) -> tuple[float, float] | None:
+        """Live CLOB V2 taker fee for a token: (rate_fraction, exponent).
+
+        V2 sets fees by the protocol at match time; ``get_fee_rate_bps``
+        returns basis points and ``get_fee_exponent`` the exponent. The
+        per-share fee is ``rate * (p*(1-p))**exponent``. Fetched once per
+        window by the runner and fed to LiveExecutionEngine.set_market_fee
+        for recorded PnL. Returns None on failure so the caller keeps its
+        current/default fee rather than mis-pricing.
+        """
+        if not self._authenticated or not self.client:
+            return None
+
+        await self._public_limiter.acquire()
+
+        try:
+            bps = self.client.get_fee_rate_bps(token_id)
+            exponent = self.client.get_fee_exponent(token_id)
+            return (float(bps) / 10000.0, float(exponent))
+        except Exception as e:
+            logger.debug(f"Failed to get market fee for {token_id[:16]}: {e}")
+            return None
+
     # ── Balance & Allowance ───────────────────────────────────────────
 
     async def get_balance(self) -> float:

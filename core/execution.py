@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from core.execution_rounds import best_ask, best_bid, log_round
 from core.kill_switch_io import halt_active
 from logging_db.database import Database
-from strategy.feature_snapshot import fee_per_share
+from strategy.feature_snapshot import FEE_RATE, fee_per_share, fee_per_share_v2
 
 logger = logging.getLogger(__name__)
 
@@ -142,16 +142,21 @@ def _log_to_db(db, trade, is_paper: bool) -> int:
     return db.insert_trade(**params)
 
 
-def _resolve_trade(trade: TradeRecord, resolution: str) -> bool:
-    """Compute P&L for a trade. Returns True if won."""
+def _resolve_trade(trade: TradeRecord, resolution: str, fee_fn=fee_per_share) -> bool:
+    """Compute P&L for a trade. Returns True if won.
+
+    ``fee_fn`` maps entry price -> fee per share (default: the validated 0.07
+    basis). The live engine passes its per-window market fee so recorded LIVE
+    P&L reflects the real CLOB V2 fee; paper keeps the default.
+    """
     trade.resolution = resolution
     trade.resolved_at = datetime.now(timezone.utc).isoformat()
     won = (trade.side == "YES" and resolution == "UP") or \
           (trade.side == "NO" and resolution == "DOWN")
 
     # Polymarket crypto taker fee, charged once at ENTRY on every trade
-    # (win or lose): FEE_RATE * shares * p * (1-p), p = entry price.
-    entry_fee = fee_per_share(trade.entry_price) * trade.num_shares
+    # (win or lose): fee_fn(p) * shares, p = entry price.
+    entry_fee = fee_fn(trade.entry_price) * trade.num_shares
 
     if won:
         payout = trade.num_shares * 1.0
@@ -432,6 +437,8 @@ class LiveExecutionEngine:
         gtc_timeout_sec: int = 10,
         bot_id: str = "",
         min_order_shares: float = 5.0,
+        fee_rate: float = FEE_RATE,
+        fee_exponent: float = 1.0,
     ):
         self.db = db
         self.poly = poly_client
@@ -439,6 +446,12 @@ class LiveExecutionEngine:
         self.fok_slippage = fok_slippage
         self.gtc_timeout_sec = gtc_timeout_sec
         self.bot_id = bot_id
+        # Live CLOB V2 taker fee for recorded PnL (rate/exponent). Defaults to
+        # the validated 0.07/exp-1 basis until set_market_fee() supplies the
+        # market's live values (fetched once per window by the runner). The
+        # entry EV gate is NOT affected — PnL-only (CLOB V2 migration decision).
+        self.fee_rate = fee_rate
+        self.fee_exponent = fee_exponent
         # Exchange minimum order size (shares). The 5-min BTC market reports
         # min_order_size = 5 (observed live 2026-06-12). A sized order below
         # this is skipped, not posted — a rejected post would otherwise spin
@@ -457,6 +470,21 @@ class LiveExecutionEngine:
         # J27 telemetry: GTC re-post round counter (per token).
         self._gtc_round_token: str = ""
         self._gtc_round_num: int = 0
+
+    def set_market_fee(self, rate: float, exponent: float) -> None:
+        """Set the live CLOB V2 taker fee (rate fraction + exponent) used for
+        recorded PnL. Called once per window by the runner from the market's
+        get_fee_rate_bps / get_fee_exponent. PnL-only — never the EV gate."""
+        self.fee_rate = rate
+        self.fee_exponent = exponent
+        logger.info(
+            f"[LIVE] market fee set: rate={rate:.4f} exponent={exponent} "
+            f"(fee@p=0.50 = ${fee_per_share_v2(0.50, rate, exponent):.4f}/share)"
+        )
+
+    def _fee_per_share(self, price: float) -> float:
+        """Entry fee per share at this market's live rate/exponent."""
+        return fee_per_share_v2(price, self.fee_rate, self.fee_exponent)
 
     async def execute_trade(
         self,
@@ -749,7 +777,7 @@ class LiveExecutionEngine:
         if not trade:
             return None
 
-        won = _resolve_trade(trade, resolution)
+        won = _resolve_trade(trade, resolution, self._fee_per_share)
 
         if won:
             self.session_wins += 1
@@ -923,9 +951,10 @@ class LiveExecutionEngine:
         trade.resolved_at = datetime.now(timezone.utc).isoformat()
         trade.resolution = f"EARLY_EXIT:{reason}" if reason else "EARLY_EXIT"
 
-        # Entry fee on the sold shares (charged once, at entry price).
+        # Entry fee on the sold shares (charged once, at entry price), at this
+        # market's live rate/exponent.
         gross_pnl = proceeds - trade.entry_price * sold
-        entry_fee = fee_per_share(trade.entry_price) * sold
+        entry_fee = self._fee_per_share(trade.entry_price) * sold
         trade.pnl = gross_pnl - entry_fee
 
         won = trade.pnl > 0
