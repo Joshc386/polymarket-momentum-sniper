@@ -749,24 +749,28 @@ class LiveExecutionEngine:
             return None
 
         order_id = resp.get("orderID", resp.get("id", ""))
+        post_status = str(resp.get("status", "")).upper()
 
-        # FOK is instant — check if it was filled
-        status_str = resp.get("status", "").upper()
-        if status_str in ("MATCHED", "FILLED"):
-            fill_px = float(resp.get("price", fok_price))
-            fill_sz = float(resp.get("size_matched", num_shares))
-            return (fill_px, fill_sz, order_id)
-
-        # If not immediately filled, FOK was rejected
-        # Try to check status once more
-        await asyncio.sleep(0.5)
+        # FOK is instant, but the POST body carries no size_matched/price
+        # (verified live 2026-06-13: {errorMsg, orderID, taking/makingAmount,
+        # status, success}). The order record is the source of truth for the
+        # fill. If the POST didn't already confirm a match, give it a moment
+        # to settle before reading.
+        if post_status not in ("MATCHED", "FILLED"):
+            await asyncio.sleep(0.5)
         status = await self.poly.get_order_status(order_id)
-        if status:
-            s = status.get("status", "").upper()
-            if s in ("MATCHED", "FILLED"):
-                fill_px = float(status.get("price", fok_price))
-                fill_sz = float(status.get("size_matched", num_shares))
-                return (fill_px, fill_sz, order_id)
+
+        state = post_status
+        if isinstance(status, dict):
+            state = str(status.get("status", post_status)).upper()
+        if state in ("MATCHED", "FILLED"):
+            src = status if isinstance(status, dict) else {}
+            # FOK fills fully or not at all, so num_shares is the size; price
+            # and size come from the record when present (fall back to the
+            # request only if the record is unavailable).
+            fill_px = float(src.get("price", fok_price) or fok_price)
+            fill_sz = float(src.get("size_matched", num_shares) or num_shares)
+            return (fill_px, fill_sz, order_id)
 
         logger.info(f"FOK order not filled at ${fok_price:.4f}")
         return None
