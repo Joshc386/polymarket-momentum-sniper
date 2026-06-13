@@ -60,10 +60,10 @@ async def main() -> int:
         print(f"  {p.get('title', p.get('asset', '?'))}: size={p.get('size')}")
 
     try:
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
+
         bal = client.client.get_balance_allowance(
-            params=__import__(
-                "py_clob_client.clob_types", fromlist=["BalanceAllowanceParams"]
-            ).BalanceAllowanceParams(asset_type="COLLATERAL")
+            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
         print(f"USDC balance/allowance (raw): {bal}")
     except Exception as e:  # balance check is best-effort, auth already proven
