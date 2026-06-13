@@ -1,9 +1,14 @@
-"""Wallet-proportional position sizing (vault to-do 1b, agreed spec Jun 11).
+"""Wallet-proportional position sizing (revised spec Jun 12).
 
-Band: floor = max($1 exchange minimum, 1% of sizing wallet),
-ceiling = 5% of sizing wallet, sizing wallet = min(bankroll, $200 cap).
-Above a $200 wallet the band freezes at $2-$10. Default OFF — legacy
-absolute $1/$5 clamps are untouched unless enabled in config.
+- max risk/trade (ceiling) = 4% of sizing wallet = min(bankroll, $200);
+  $4 @ $100, $8 @ $200, flat $8 above.
+- min risk/trade (floor):
+    * wallet < $200: the dynamic exchange minimum = max(5 x price, $1).
+      Kelly results below it are BUMPED up to it and the trade is tagged.
+    * wallet >= $200: flat $5.
+- skip (size 0) when the exchange floor cannot fit under the ceiling
+  (high price on a small wallet) — never breach the max-risk cap.
+Default OFF — legacy absolute $1/$5 clamps untouched unless enabled.
 """
 
 from core.execution import PaperExecutionEngine
@@ -13,6 +18,9 @@ from strategy.sizing import PositionSizer
 # A strong edge that pushes raw Kelly well above any ceiling we test:
 # p=0.9 at price 0.5 -> kelly = 0.8, quarter-kelly = 0.2 -> 20% of bankroll.
 STRONG = dict(est_prob=0.9, share_price=0.5)
+# A real but tiny edge: p=0.51 at price 0.5 -> quarter-kelly = 0.5% of
+# wallet, always below the floor -> bet bumps UP to the floor.
+WEAK = dict(est_prob=0.51, share_price=0.5)
 
 
 def make_sizer(**overrides) -> PositionSizer:
@@ -26,32 +34,76 @@ def make_sizer(**overrides) -> PositionSizer:
     return PositionSizer(**params)
 
 
-def test_ceiling_scales_with_wallet() -> None:
-    # 5% of a $150 wallet -> $7.50 cap (was $5 flat).
-    assert make_sizer().compute(bankroll=150.0, **STRONG) == 7.5
+# ── Ceiling: 4% of the capped sizing wallet ──────────────────────────
+
+def test_ceiling_is_four_pct_at_hundred() -> None:
+    assert make_sizer().compute(bankroll=100.0, **STRONG) == 4.0
 
 
-def test_band_freezes_above_wallet_cap() -> None:
-    # Above $200 the sizing wallet stays $200 -> ceiling stays $10.
-    assert make_sizer().compute(bankroll=1000.0, **STRONG) == 10.0
+def test_ceiling_scales_to_eight_at_two_hundred() -> None:
+    assert make_sizer().compute(bankroll=150.0, **STRONG) == 6.0   # 4% of 150
+    assert make_sizer().compute(bankroll=200.0, **STRONG) == 8.0   # 4% of 200
 
 
-# A real but tiny edge: p=0.51 at price 0.5 -> quarter-kelly = 0.5% of
-# bankroll, always below the 1% floor -> bet clamps UP to the floor.
-WEAK = dict(est_prob=0.51, share_price=0.5)
+def test_ceiling_freezes_at_eight_above_cap() -> None:
+    assert make_sizer().compute(bankroll=1000.0, **STRONG) == 8.0
 
 
-def test_floor_is_one_pct_of_wallet() -> None:
-    assert make_sizer().compute(bankroll=150.0, **WEAK) == 1.5
+# ── Floor below the cap: the dynamic exchange minimum (5 x price) ─────
+
+def test_floor_below_cap_is_five_shares_times_price() -> None:
+    # Tiny edge (est_prob just over the price) so Kelly sizes below the floor
+    # and the bet bumps up to the dynamic exchange minimum.
+    s = make_sizer()
+    assert s.compute(bankroll=100.0, est_prob=0.31, share_price=0.30) == 1.5  # 5*0.30
+    assert s.compute(bankroll=100.0, est_prob=0.51, share_price=0.50) == 2.5  # 5*0.50
 
 
-def test_floor_freezes_at_two_dollars_above_cap() -> None:
-    assert make_sizer().compute(bankroll=1000.0, **WEAK) == 2.0
+def test_floor_below_cap_does_not_scale_with_wallet() -> None:
+    # Price-driven, not wallet-driven, anywhere below $200.
+    s = make_sizer()
+    assert s.compute(bankroll=120.0, est_prob=0.51, share_price=0.50) == 2.5
+    assert s.compute(bankroll=190.0, est_prob=0.51, share_price=0.50) == 2.5
 
 
-def test_floor_never_below_exchange_minimum() -> None:
-    # 1% of an $80 wallet is $0.80 -- below Polymarket's $1 minimum order.
-    assert make_sizer().compute(bankroll=80.0, **WEAK) == 1.0
+def test_floor_backstopped_at_one_dollar_for_cheap_shares() -> None:
+    # 5 * 0.10 = $0.50 -> $1 exchange-notional backstop (tiny edge -> bump).
+    assert make_sizer().compute(bankroll=100.0, est_prob=0.11, share_price=0.10) == 1.0
+
+
+# ── Floor at/above the cap: flat $5 ──────────────────────────────────
+
+def test_floor_is_flat_five_at_and_above_cap() -> None:
+    s = make_sizer()
+    assert s.compute(bankroll=200.0, **WEAK) == 5.0
+    assert s.compute(bankroll=1000.0, **WEAK) == 5.0
+
+
+# ── Skip when the exchange floor exceeds the ceiling ─────────────────
+
+def test_skip_when_five_shares_exceeds_the_cap() -> None:
+    # $100 wallet, price 0.85: floor = 5*0.85 = $4.25 > $4 ceiling -> skip
+    # (independent of edge — the band can't fit a compliant order).
+    assert make_sizer().compute(bankroll=100.0, est_prob=0.90, share_price=0.85) == 0.0
+    # price 0.80 fits exactly (5 shares = $4.00 = ceiling).
+    assert make_sizer().compute(bankroll=100.0, est_prob=0.81, share_price=0.80) == 4.0
+
+
+# ── decide(): bump / skip flags for trade tagging ────────────────────
+
+def test_decide_flags_bump_cap_and_skip() -> None:
+    s = make_sizer()
+    bumped = s.decide(bankroll=100.0, est_prob=0.51, share_price=0.50)
+    assert bumped.bumped is True and bumped.skipped is False and bumped.size == 2.5
+    capped = s.decide(bankroll=100.0, **STRONG)
+    assert capped.bumped is False and capped.size == 4.0   # clamped down, not bumped
+    skipped = s.decide(bankroll=100.0, est_prob=0.51, share_price=0.85)
+    assert skipped.skipped is True and skipped.size == 0.0
+
+
+def test_compute_matches_decide_size() -> None:
+    s = make_sizer()
+    assert s.compute(bankroll=100.0, **WEAK) == s.decide(bankroll=100.0, **WEAK).size
 
 
 _TRADE = dict(
@@ -109,6 +161,7 @@ def test_legacy_mode_is_default_and_unchanged() -> None:
     assert legacy.compute(bankroll=150.0, **STRONG) == 5.0   # absolute cap
     assert legacy.compute(bankroll=1000.0, **WEAK) == 5.0    # kelly on full bankroll, capped
     assert legacy.compute(bankroll=150.0, **WEAK) == 1.0     # clamps up to $1 min
+    assert legacy.wallet_proportional is False
 
 
 def test_strategy_wires_proportional_sizing_from_config(tmp_path) -> None:

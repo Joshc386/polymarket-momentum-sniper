@@ -242,9 +242,10 @@ class ContrarianEvStrategy:
             min_bet_usdc=sizing_cfg.get("min_bet_usdc", 1.0),
             max_bet_usdc=sizing_cfg.get("max_bet_usdc", 5.0),
             wallet_proportional=sizing_cfg.get("wallet_proportional", False),
-            floor_pct=sizing_cfg.get("floor_pct", 0.01),
-            ceiling_pct=sizing_cfg.get("ceiling_pct", 0.05),
+            ceiling_pct=sizing_cfg.get("ceiling_pct", 0.04),
             wallet_cap_usdc=sizing_cfg.get("wallet_cap_usdc", 200.0),
+            min_order_shares=sizing_cfg.get("min_order_shares", 5.0),
+            floor_at_cap_usdc=sizing_cfg.get("floor_at_cap_usdc", 5.0),
         )
 
         risk_cfg = cfg.get("risk", {})
@@ -1210,12 +1211,13 @@ class ContrarianEvStrategy:
             self._est_prob_up if ed.side == "YES"
             else (1.0 - self._est_prob_up)
         )
-        bet_size = self._sizer.compute(
+        sizing = self._sizer.decide(
             est_prob=win_prob,
             share_price=ed.price,
             bankroll=self._executor.bankroll,
             size_multiplier=self._risk_state.size_multiplier,
         )
+        bet_size = sizing.size
         if bet_size <= 0:
             # Sizer rejected the trade. Log the values so we know why and
             # mark the decision so the dashboard doesn't keep showing a
@@ -1258,6 +1260,10 @@ class ContrarianEvStrategy:
                 entry_price=ed.price,
             )
         )
+        # Tag bumped-to-floor trades so the probe analysis can separate
+        # naturally-sized fills from exchange-minimum bumps (ADR-0003).
+        feature_snapshot["size_bumped"] = 1 if sizing.bumped else 0
+        feature_snapshot["kelly_raw_usdc"] = round(sizing.raw, 4)
 
         mkt = snapshot.market
         trade = self._submit_entry(

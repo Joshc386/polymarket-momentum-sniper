@@ -147,6 +147,10 @@ _MIGRATIONS = [
     ("trades", "required_edge", "REAL"),
     ("trades", "secs_into_window", "REAL"),
     ("trades", "schedule_override", "TEXT"),
+    # Sizing provenance (2026-06-12, ADR-0003): was the bet bumped up to the
+    # exchange-minimum floor, and what raw quarter-Kelly USDC preceded it.
+    ("trades", "size_bumped", "INTEGER"),
+    ("trades", "kelly_raw_usdc", "REAL"),
     ("signal_log", "orderbook_signal", "REAL"),
     ("signal_log", "sentiment_signal", "REAL"),
     ("signal_log", "coinbase_direction", "REAL"),

@@ -602,15 +602,17 @@ bots:
       min_bet_usdc: 1.0
       max_bet_usdc: 5.0
       initial_bankroll: 100.0
-      # Wallet-proportional sizing (2026-06-11, vault to-do 1b):
-      # band = [max($1, 1% of wallet), 5% of wallet], wallet capped at
-      # $200 for sizing ($2-$10 frozen above). Paper wallet persists
-      # across restarts: bankroll = initial + PnL since bankroll_epoch.
-      # Validated: backtest/compounding_sizing_replay.py.
+      # Wallet-proportional sizing (revised 2026-06-12, ADR-0003 / J30):
+      # max risk/trade = 4% of min(wallet,$200); min risk/trade = the
+      # dynamic exchange minimum (5*price) below $200, flat $5 at/above.
+      # Kelly bumps up to the floor (trade tagged size_bumped); skips if
+      # the floor can't fit under the ceiling. Paper wallet persists across
+      # restarts: bankroll = initial + PnL since bankroll_epoch.
       wallet_proportional: true
-      floor_pct: 0.01
-      ceiling_pct: 0.05
+      ceiling_pct: 0.04            # max risk/trade = 4% of wallet: $4@$100, $8@$200, flat above
       wallet_cap_usdc: 200.0
+      min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
+      floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
       bankroll_epoch: "2026-06-11T13:00:00+00:00"
 
     risk:
@@ -740,9 +742,10 @@ bots:
       # Wallet-proportional sizing — identical to Bot K (A/B requires
       # both bots on the same sizing scheme). See Bot K block for spec.
       wallet_proportional: true
-      floor_pct: 0.01
-      ceiling_pct: 0.05
+      ceiling_pct: 0.04            # max risk/trade = 4% of wallet: $4@$100, $8@$200, flat above
       wallet_cap_usdc: 200.0
+      min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
+      floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
       bankroll_epoch: "2026-06-11T13:00:00+00:00"
 
     risk:
@@ -841,9 +844,10 @@ bots:
       max_bet_usdc: 5.0
       initial_bankroll: 100.0
       wallet_proportional: true
-      floor_pct: 0.01
-      ceiling_pct: 0.05
+      ceiling_pct: 0.04            # max risk/trade = 4% of wallet: $4@$100, $8@$200, flat above
       wallet_cap_usdc: 200.0
+      min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
+      floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
       bankroll_epoch: "2026-06-12T19:00:00+00:00"
 
     risk:

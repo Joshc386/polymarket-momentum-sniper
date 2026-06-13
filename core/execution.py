@@ -89,6 +89,7 @@ _ENRICHED_COLUMNS = [
     "l10_exhaustion", "l11_trade_size", "l12_wallet_flow",
     "prob_edge", "net_ev_per_share", "required_edge",
     "secs_into_window", "schedule_override",
+    "size_bumped", "kelly_raw_usdc",
 ]
 
 
