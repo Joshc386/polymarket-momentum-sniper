@@ -430,6 +430,7 @@ class LiveExecutionEngine:
         fok_slippage: float = 0.005,
         gtc_timeout_sec: int = 10,
         bot_id: str = "",
+        min_order_shares: float = 5.0,
     ):
         self.db = db
         self.poly = poly_client
@@ -437,6 +438,12 @@ class LiveExecutionEngine:
         self.fok_slippage = fok_slippage
         self.gtc_timeout_sec = gtc_timeout_sec
         self.bot_id = bot_id
+        # Exchange minimum order size (shares). The 5-min BTC market reports
+        # min_order_size = 5 (observed live 2026-06-12). A sized order below
+        # this is skipped, not posted — a rejected post would otherwise spin
+        # the re-post loop. Counted for the dashboard / telemetry.
+        self.min_order_shares = min_order_shares
+        self.below_min_skips = 0
         self.pending_trade: TradeRecord | None = None
         self.pending_trade_time: float = 0.0
         self.pending_order_id: str | None = None
@@ -504,6 +511,24 @@ class LiveExecutionEngine:
         token_id = yes_token_id if side == "YES" else no_token_id
         if not token_id:
             logger.error(f"No token ID for side {side}")
+            return None
+
+        # Exchange-minimum guard: a sized order below min_order_shares would
+        # be rejected by the CLOB and spin the re-post loop. Skip + count it
+        # rather than over-bet (user decision 2026-06-12, ADR-0003).
+        est_shares = size_usdc / price if price > 0 else 0.0
+        if est_shares < self.min_order_shares:
+            self.below_min_skips += 1
+            logger.info(
+                f"[LIVE] skip {side} @ ${price:.4f}: {est_shares:.1f} shares "
+                f"(${size_usdc:.2f}) < {self.min_order_shares:.0f}-share "
+                f"exchange minimum"
+            )
+            log_round({
+                "bot_id": self.bot_id, "outcome": "below_min", "side": side,
+                "price": price, "size_usdc": size_usdc,
+                "est_shares": est_shares, "min_shares": self.min_order_shares,
+            })
             return None
 
         # Choose order type based on time remaining

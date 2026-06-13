@@ -248,7 +248,8 @@ def test_execute_trade_wires_spread_into_round_record(monkeypatch, tmp_path):
     }
 
     kwargs = dict(
-        side="YES", price=0.52, size_usdc=2.08, market_id="m", market_slug="s",
+        # $3.12 at 0.52 = 6 shares, clears the 5-share exchange minimum.
+        side="YES", price=0.52, size_usdc=3.12, market_id="m", market_slug="s",
         oracle_lag_signal=0.0, momentum_signal=0.0, liquidation_signal=0.0,
         combined_signal=0.0, estimated_prob_up=0.5, market_implied_prob=0.5,
         edge=0.05, time_remaining_secs=120.0, btc_price=70000.0,

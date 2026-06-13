@@ -36,7 +36,9 @@ def _engine_with_position(**kwargs):
          patch("core.execution.halt_active", return_value=False), \
          patch("core.execution._log_to_db", return_value=1):
         trade = asyncio.run(eng.execute_trade(
-            side="YES", price=0.50, size_usdc=2.0, market_id="m",
+            # $3 at 0.50 = 6 shares, clears the 5-share exchange minimum;
+            # the mocked fill still returns 4 shares matched.
+            side="YES", price=0.50, size_usdc=3.0, market_id="m",
             market_slug="s", oracle_lag_signal=0.0, momentum_signal=0.0,
             liquidation_signal=0.0, combined_signal=0.0,
             estimated_prob_up=0.5, market_implied_prob=0.5, edge=0.05,

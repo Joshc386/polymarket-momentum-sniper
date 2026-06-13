@@ -22,7 +22,9 @@ def _engine():
 
 def _entry_kwargs():
     return dict(
-        side="YES", price=0.5, size_usdc=2.0, market_id="m", market_slug="s",
+        # $5 at 0.50 = 10 shares — clears the 5-share exchange minimum so the
+        # not-halted path reaches the order machinery (the guard under test).
+        side="YES", price=0.5, size_usdc=5.0, market_id="m", market_slug="s",
         oracle_lag_signal=0.0, momentum_signal=0.0, liquidation_signal=0.0,
         combined_signal=0.0, estimated_prob_up=0.5, market_implied_prob=0.5,
         edge=0.05, time_remaining_secs=120.0, btc_price=70000.0,
