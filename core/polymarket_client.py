@@ -16,13 +16,20 @@ from core.rate_limiter import TokenBucketRateLimiter, public_limiter, trading_li
 
 logger = logging.getLogger(__name__)
 
-# py-clob-client lives only in the deployment venv; guard the import so the
-# module (and its tests) load on the system interpreter too. Balance queries
-# require the params-object form (verified live 2026-06-12).
+# py-clob-client lives only in the deployment venv; guard the imports so the
+# module (and its tests) load on the system interpreter too. Orders require
+# OrderArgs objects (NOT dicts) and an OrderType enum for post_order, and
+# balance queries require the params-object form (all verified live 2026-06-12).
 try:
-    from py_clob_client.clob_types import BalanceAllowanceParams
+    from py_clob_client.clob_types import (
+        BalanceAllowanceParams, OrderArgs, OrderType,
+    )
+    from py_clob_client.order_builder.constants import BUY, SELL
 except ImportError:  # pragma: no cover - present in the live venv
     BalanceAllowanceParams = None
+    OrderArgs = None
+    OrderType = None
+    BUY, SELL = "BUY", "SELL"
 
 # Polymarket CLOB constants
 CLOB_HOST = "https://clob.polymarket.com"
@@ -138,26 +145,29 @@ class PolymarketClient:
             logger.error("Cannot place order: not authenticated")
             return None
 
+        if OrderArgs is None:
+            logger.error("py-clob-client unavailable — cannot place order")
+            return None
+
         await self._trading_limiter.acquire()
 
         try:
-            from py_clob_client.order_builder.constants import BUY, SELL
-
             order_side = BUY if side.upper() == "BUY" else SELL
 
-            # Build the order
-            order_args = {
-                "token_id": token_id,
-                "price": round(price, 2),
-                "size": round(size, 2),
-                "side": order_side,
-            }
-
-            if order_type == "FOK":
-                order_args["order_type"] = "FOK"
-
+            # create_order requires an OrderArgs OBJECT (a dict raises
+            # 'dict has no attribute token_id'); post_order takes the OrderType
+            # enum positionally (there is no order_type kwarg).
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=round(price, 2),
+                size=round(size, 2),
+                side=order_side,
+            )
             signed_order = self.client.create_order(order_args)
-            resp = self.client.post_order(signed_order, order_type=order_type)
+            order_type_enum = {
+                "FOK": OrderType.FOK, "GTD": OrderType.GTD,
+            }.get(order_type, OrderType.GTC)
+            resp = self.client.post_order(signed_order, order_type_enum)
 
             if resp and isinstance(resp, dict):
                 order_id = resp.get("orderID", resp.get("id", ""))
