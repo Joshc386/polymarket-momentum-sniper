@@ -437,6 +437,7 @@ class LiveExecutionEngine:
         gtc_timeout_sec: int = 10,
         bot_id: str = "",
         min_order_shares: float = 5.0,
+        max_trade_usdc: float = 25.0,
         fee_rate: float = FEE_RATE,
         fee_exponent: float = 1.0,
     ):
@@ -458,6 +459,13 @@ class LiveExecutionEngine:
         # the re-post loop. Counted for the dashboard / telemetry.
         self.min_order_shares = min_order_shares
         self.below_min_skips = 0
+        # Hard absolute max exposure per LIVE trade (USDC). Defense-in-depth,
+        # independent of strategy/sizing.py's ceiling (4%*min(wallet,$200), tops
+        # at ~$8): a sizing bug or bad config must never risk more than this on
+        # one trade. Backstop, not the primary cap — tune up with the sizing
+        # band as the wallet grows. Over-cap orders are refused + counted.
+        self.max_trade_usdc = max_trade_usdc
+        self.over_max_skips = 0
         self.pending_trade: TradeRecord | None = None
         self.pending_trade_time: float = 0.0
         self.pending_order_id: str | None = None
@@ -540,6 +548,24 @@ class LiveExecutionEngine:
         token_id = yes_token_id if side == "YES" else no_token_id
         if not token_id:
             logger.error(f"No token ID for side {side}")
+            return None
+
+        # Hard max-exposure guard (defense-in-depth, independent of the sizing
+        # layer): a sizing bug or bad config must never risk more than
+        # max_trade_usdc on a single live trade. Refuse + count loudly rather
+        # than place an oversized order (CSO finding 2026-06-13).
+        if size_usdc > self.max_trade_usdc:
+            self.over_max_skips += 1
+            logger.critical(
+                f"[LIVE] REFUSING {side} @ ${price:.4f}: size ${size_usdc:.2f} "
+                f"exceeds max_trade_usdc ${self.max_trade_usdc:.2f} -- possible "
+                f"sizing bug; not placing"
+            )
+            log_round({
+                "bot_id": self.bot_id, "outcome": "over_max", "side": side,
+                "price": price, "size_usdc": size_usdc,
+                "max_trade_usdc": self.max_trade_usdc,
+            })
             return None
 
         # Exchange-minimum guard: a sized order below min_order_shares would
