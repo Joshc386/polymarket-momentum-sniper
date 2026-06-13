@@ -20,15 +20,16 @@ logger = logging.getLogger(__name__)
 # module (and its tests) load on the system interpreter too. Orders require
 # OrderArgs objects (NOT dicts) and an OrderType enum for post_order, and
 # balance queries require the params-object form (all verified live 2026-06-12).
+# NOTE: do NOT import py-clob-client's OrderType here — this module defines
+# its own `class OrderType(Enum)` below which would shadow it (and that enum
+# is not JSON-serializable). post_order takes the order-type STRING, which is
+# exactly what py-clob-client's own OrderType members are.
 try:
-    from py_clob_client.clob_types import (
-        BalanceAllowanceParams, OrderArgs, OrderType,
-    )
+    from py_clob_client.clob_types import BalanceAllowanceParams, OrderArgs
     from py_clob_client.order_builder.constants import BUY, SELL
 except ImportError:  # pragma: no cover - present in the live venv
     BalanceAllowanceParams = None
     OrderArgs = None
-    OrderType = None
     BUY, SELL = "BUY", "SELL"
 
 # Polymarket CLOB constants
@@ -164,10 +165,14 @@ class PolymarketClient:
                 side=order_side,
             )
             signed_order = self.client.create_order(order_args)
-            order_type_enum = {
-                "FOK": OrderType.FOK, "GTD": OrderType.GTD,
-            }.get(order_type, OrderType.GTC)
-            resp = self.client.post_order(signed_order, order_type_enum)
+            # Pass the order-type STRING positionally. py-clob-client's own
+            # OrderType.GTC/FOK ARE these strings; passing this module's local
+            # OrderType enum instead makes the request body unserializable.
+            order_type_str = (
+                order_type if order_type in ("GTC", "FOK", "GTD", "FAK")
+                else "GTC"
+            )
+            resp = self.client.post_order(signed_order, order_type_str)
 
             if resp and isinstance(resp, dict):
                 order_id = resp.get("orderID", resp.get("id", ""))

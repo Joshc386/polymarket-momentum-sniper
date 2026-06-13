@@ -1,16 +1,23 @@
 """Regression tests for PolymarketClient.place_order (2026-06-12).
 
 The live smoke test (tools/live_smoke_test.py --place-real-order) surfaced
-two real bugs the mocked suite couldn't:
+three real bugs the mocked suite couldn't:
   1. create_order was passed a plain dict; py-clob-client requires an
      OrderArgs OBJECT -> "'dict' object has no attribute 'token_id'".
   2. post_order was called with a non-existent order_type= kwarg; the real
-     signature takes the OrderType enum positionally (orderType=).
-Both would have failed on the first live order. These tests pin the call
-contract against a fake client that behaves like the real one.
+     signature takes the order type positionally.
+  3. The order type passed was this module's LOCAL `class OrderType(Enum)`,
+     which shadows the py-clob-client import and is NOT JSON-serializable ->
+     "Object of type OrderType is not JSON serializable". py-clob-client's
+     own OrderType members ARE the plain strings "GTC"/"FOK", so place_order
+     must pass the STRING.
+All three would have failed on the first live order. These tests pin the
+call contract against a fake client that serializes the order type the way
+the real client does.
 """
 
 import asyncio
+import json
 from unittest.mock import MagicMock, patch
 
 from core.polymarket_client import PolymarketClient
@@ -26,26 +33,22 @@ class _FakeOrderArgs:
         self.side = side
 
 
-class _FakeOrderType:
-    GTC = "GTC"
-    FOK = "FOK"
-    GTD = "GTD"
-
-
 class _FakeClob:
     """Behaves like the real client: create_order needs an OBJECT with
-    .token_id (a dict raises), post_order takes orderType positionally."""
+    .token_id (a dict raises); post_order serializes the order type into the
+    request body (a non-string-serializable value raises, as it did live)."""
 
     def __init__(self):
         self.created = None
         self.posted_type = None
 
     def create_order(self, order_args, options=None):
-        _ = order_args.token_id  # a dict would AttributeError here (the bug)
+        _ = order_args.token_id  # a dict would AttributeError here (bug 1)
         self.created = order_args
         return {"signed": True}
 
     def post_order(self, order, orderType="GTC", post_only=False):
+        json.dumps({"orderType": orderType})  # bug 3: enum is not serializable
         self.posted_type = orderType
         return {"orderID": "0xORDER", "status": "live"}
 
@@ -57,11 +60,10 @@ def _client(fake):
     return c
 
 
-def test_place_order_builds_orderargs_object_and_returns_id():
+def test_place_order_passes_serializable_string_order_type_and_returns_id():
     fake = _FakeClob()
     c = _client(fake)
-    with patch("core.polymarket_client.OrderArgs", _FakeOrderArgs), \
-         patch("core.polymarket_client.OrderType", _FakeOrderType):
+    with patch("core.polymarket_client.OrderArgs", _FakeOrderArgs):
         resp = asyncio.run(c.place_order(
             token_id="0xTOK", side="BUY", price=0.52, size=5.0, order_type="GTC"
         ))
@@ -69,18 +71,19 @@ def test_place_order_builds_orderargs_object_and_returns_id():
     assert fake.created.token_id == "0xTOK"   # an OrderArgs object, not a dict
     assert fake.created.price == 0.52
     assert fake.created.size == 5.0
-    assert fake.posted_type == "GTC"          # OrderType passed positionally
+    assert fake.posted_type == "GTC"          # the STRING, JSON-serializable
+    assert isinstance(fake.posted_type, str)
 
 
-def test_place_order_maps_fok_to_order_type_enum():
+def test_place_order_passes_fok_string():
     fake = _FakeClob()
     c = _client(fake)
-    with patch("core.polymarket_client.OrderArgs", _FakeOrderArgs), \
-         patch("core.polymarket_client.OrderType", _FakeOrderType):
+    with patch("core.polymarket_client.OrderArgs", _FakeOrderArgs):
         asyncio.run(c.place_order(
             token_id="0xTOK", side="SELL", price=0.40, size=5.0, order_type="FOK"
         ))
     assert fake.posted_type == "FOK"
+    assert isinstance(fake.posted_type, str)
 
 
 def test_place_order_returns_none_when_unauthenticated():
