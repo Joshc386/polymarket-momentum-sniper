@@ -326,6 +326,7 @@ class ContrarianEvStrategy:
         self._filter_skipped = {
             "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
             "high_ev_early": 0, "l1_against_line": 0, "side_locked": 0,
+            "entry_unconfirmed": 0,
         }
 
         # Per-tick signal diagnostic logger (off by default; enable in config
@@ -425,6 +426,16 @@ class ContrarianEvStrategy:
         # opposite side for the rest of the window so a mid-window signal flip
         # can't open an opposite-side position (multi-entry bug 2026-06-15).
         self._window_side: str | None = None
+        # Fail-safe: set when a round could not confirm its fill state (engine
+        # entry_unconfirmed), a live entry round died, or a prior-window fill
+        # straddled into this window. Blocks all further entries this window so
+        # we never re-post into a possible untracked stack. Reset each window.
+        self._entry_blocked_unknown = False
+        # Window the runner currently has us in, and the window a fire-and-
+        # forget entry round was launched for — compared in _on_entry_done to
+        # refuse booking a straddling prior-window fill into the new window.
+        self._current_window_slug = ""
+        self._entry_task_window = ""
         self._entry_decision = EntryDecision()
         self._last_trade_msg = ""
 
@@ -454,6 +465,10 @@ class ContrarianEvStrategy:
         """Reset per-window state."""
         self._has_position = False
         self._window_side = None
+        self._entry_blocked_unknown = False
+        self._current_window_slug = (
+            snapshot.market.slug if snapshot.market else ""
+        )
         self._entry_decision = EntryDecision()
         self._orderbook.reset()
         self._orderbook_fade.reset()
@@ -1136,6 +1151,17 @@ class ContrarianEvStrategy:
             size. Prevents walking the book on thin markets. At $5 stakes
             this rarely fires; becomes important when sizing up.
         """
+        # Fail-safe block: a prior round this window could not confirm whether
+        # it filled (unreadable status / dead task / cross-window straddle), so
+        # we refuse ALL further entries this window rather than re-post into a
+        # possible untracked stack (multi-entry bug 2026-06-15, review hardening).
+        if self._entry_blocked_unknown:
+            self._filter_skipped["entry_unconfirmed"] += 1
+            return (
+                "entry_unconfirmed: a prior round this window could not confirm "
+                "its fill state -- refusing further entries"
+            )
+
         # Per-window side lock: once this window has placed an order, only the
         # committed side may re-post. A mid-window signal flip must NOT open an
         # opposite-side position (multi-entry bug 2026-06-15). This is the
@@ -1366,6 +1392,9 @@ class ContrarianEvStrategy:
         if self._entry_in_flight:
             return None
         self._lock_window_side(kwargs.get("side"))
+        # Remember which window this round is for, so a fill that only drains
+        # after the window rolls is not booked into the next window's state.
+        self._entry_task_window = kwargs.get("market_slug", "")
         self._entry_in_flight = True
         self._entry_task = asyncio.get_running_loop().create_task(
             self._executor.execute_trade(**kwargs)
@@ -1381,15 +1410,44 @@ class ContrarianEvStrategy:
         except asyncio.CancelledError:
             return
         except Exception:
+            # We don't know whether the order filled -> fail safe: block further
+            # entries this window rather than re-post into a possible stack.
             logger.exception("[%s] live entry round died", self.name)
+            self._entry_blocked_unknown = True
             return
         if trade:
+            # Cross-window straddle guard: a round launched in a prior window
+            # that only drains now must NOT be booked into the current window
+            # (different market). Don't corrupt this window's state; block
+            # further entries so we don't stack while the straddle is
+            # unresolved. The straddling fill's accounting is left for the
+            # on-chain reconcile backstop (deferred Option C).
+            if (
+                self._entry_task_window
+                and self._current_window_slug
+                and self._entry_task_window != self._current_window_slug
+            ):
+                logger.critical(
+                    "[%s] entry filled for window %s but current window is %s "
+                    "-- NOT booking into the current window; blocking entries "
+                    "this window (cross-window straddle)",
+                    self.name, self._entry_task_window, self._current_window_slug,
+                )
+                self._entry_blocked_unknown = True
+                return
             self._has_position = True
             self._last_trade_msg = (
                 f">> [LIVE] {trade.side} @ "
                 f"${trade.entry_price:.4f} ${trade.size_usdc:.2f}"
             )
             logger.info(f"[{self.name}] {self._last_trade_msg}")
+        elif getattr(self._executor, "entry_unconfirmed", False):
+            # The round couldn't confirm whether it filled -> fail safe.
+            logger.warning(
+                "[%s] entry round unconfirmed -- blocking further entries "
+                "this window", self.name,
+            )
+            self._entry_blocked_unknown = True
 
     def _submit_exit(self, exit_price: float, reason: str, on_booked) -> None:
         """Dispatch an early exit to the executor.

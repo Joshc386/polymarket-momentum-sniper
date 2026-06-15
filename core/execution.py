@@ -17,12 +17,6 @@ from strategy.feature_snapshot import FEE_RATE, fee_per_share, fee_per_share_v2
 
 logger = logging.getLogger(__name__)
 
-# Order states from which no further fill can occur. Used by the GTC
-# cancel/fill race guard to decide when a post-cancel "miss" is confirmed.
-_TERMINAL_ORDER_STATES = frozenset(
-    {"MATCHED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED"}
-)
-
 
 @dataclass
 class TradeRecord:
@@ -495,6 +489,11 @@ class LiveExecutionEngine:
         # a late fill is captured instead of stacking an untracked position.
         self.cancel_confirm_polls: int = 3
         self.cancel_confirm_interval_sec: float = 0.5
+        # Set True by a GTC round whose fill state could NOT be read after the
+        # cancel (status unreadable across the whole poll budget). The strategy
+        # checks this and blocks further entries this window rather than
+        # re-post into a possible untracked stack. Reset per entry attempt.
+        self.entry_unconfirmed: bool = False
 
     def set_market_fee(self, rate: float, exponent: float) -> None:
         """Set the live CLOB V2 taker fee (rate fraction + exponent) used for
@@ -551,6 +550,9 @@ class LiveExecutionEngine:
         Chooses between GTC and FOK based on time remaining.
         Handles order monitoring and cancellation.
         """
+        # Fresh per-attempt: only this round's post-cancel reconcile may set it.
+        self.entry_unconfirmed = False
+
         # Kill switch: never place a NEW order once HALT is set. The kill
         # switch owns cancellation/flattening; a recovering bot must not race
         # it. Checked here (not only at the loop top) to close the mid-tick
@@ -738,30 +740,42 @@ class LiveExecutionEngine:
         logger.info(f"GTC order not filled in {self.gtc_timeout_sec}s, cancelling")
         await self.poly.cancel_order(order_id)
 
-        # Cancel/fill race guard (multi-entry bug 2026-06-15): a match can
-        # settle as the cancel lands, a beat after the first status read. The
-        # old single read therefore missed late fills, the round returned None,
-        # and the per-tick re-post loop stacked an untracked on-chain position.
-        # Poll to a TERMINAL state (or a non-zero match) before declaring a
-        # miss, then read the FINAL size_matched. A "miss" now means CONFIRMED
-        # zero fill. A non-dict/unavailable status cannot confirm a fill, so it
-        # is treated as a miss (the window-end/kill-switch reconcile is the
-        # deeper backstop) — this also keeps the no-status timeout path fast.
+        # Cancel/fill race guard (multi-entry bug 2026-06-15; hardened after
+        # code review). A match can settle as the cancel lands, a beat after
+        # the first status read. The old single read missed late fills, the
+        # round returned None, and the per-tick re-post loop stacked an
+        # untracked on-chain position. Poll across the budget before deciding:
+        #   - non-zero match -> book it (the late fill);
+        #   - readable status with zero matched -> keep polling (a terminal
+        #     status can race AHEAD of size_matched), confirmed-miss only if it
+        #     stays zero through the whole budget;
+        #   - status never readable (every poll errored/None) -> UNKNOWN: we
+        #     cannot rule out a fill, so flag entry_unconfirmed and let the
+        #     strategy block further entries this window rather than re-post.
+        # All numeric reads are guarded: a malformed string must not raise out
+        # of the round (an unhandled error would drop a real fill -> re-post).
         matched = 0.0
         fill_px = price
+        status_readable = False
         for poll in range(self.cancel_confirm_polls):
             try:
                 final = await self.poly.get_order_status(order_id)
             except Exception:
                 final = None
-            if not isinstance(final, dict):
-                break
-            matched = float(final.get("size_matched", 0) or 0)
-            if matched > 0:
-                fill_px = float(final.get("price", price) or price)
-                break
-            if str(final.get("status", "")).upper() in _TERMINAL_ORDER_STATES:
-                break  # terminal with nothing matched -> confirmed miss
+            if isinstance(final, dict):
+                status_readable = True
+                try:
+                    matched = float(final.get("size_matched", 0) or 0)
+                except (TypeError, ValueError):
+                    matched = 0.0
+                if matched > 0:
+                    try:
+                        fill_px = float(final.get("price", price) or price)
+                    except (TypeError, ValueError):
+                        fill_px = price
+                    break
+            # Unreadable (retry) or readable-but-zero (a racing match may still
+            # surface) -> poll again until the budget is spent.
             if poll < self.cancel_confirm_polls - 1:
                 await asyncio.sleep(self.cancel_confirm_interval_sec)
         if matched > 0:
@@ -771,6 +785,14 @@ class LiveExecutionEngine:
             )
             record("filled", fill_price=fill_px, fill_shares=matched)
             return (fill_px, matched, order_id)
+        if not status_readable:
+            # Couldn't confirm the order's fate after cancelling -> fail safe.
+            self.entry_unconfirmed = True
+            logger.warning(
+                f"[LIVE] GTC post-cancel status unreadable after "
+                f"{self.cancel_confirm_polls} polls -- entry UNCONFIRMED; "
+                f"strategy will block further entries this window"
+            )
 
         # <=60s left now -> execute_trade will not route to GTC again, so
         # this was the final round of the re-post loop (the floor stop).

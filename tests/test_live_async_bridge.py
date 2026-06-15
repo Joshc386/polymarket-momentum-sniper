@@ -25,6 +25,9 @@ def _skeleton(executor) -> ContrarianEvStrategy:
     s._entry_task = None
     s._has_position = False
     s._window_side = None
+    s._entry_blocked_unknown = False
+    s._current_window_slug = ""
+    s._entry_task_window = ""
     s._last_trade_msg = ""
     return s
 

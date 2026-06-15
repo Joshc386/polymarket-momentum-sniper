@@ -94,8 +94,8 @@ def test_unavailable_status_after_cancel_stays_a_miss(monkeypatch, tmp_path):
 
 
 def test_terminal_zero_match_stays_a_miss(monkeypatch, tmp_path):
-    """A terminal status with nothing matched is a CONFIRMED miss -- no further
-    polling, no phantom fill."""
+    """A terminal status that stays at zero through the poll budget is a
+    CONFIRMED miss -- no phantom fill, and not flagged unconfirmed."""
     eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
     poly.place_order.return_value = {"orderID": "ord-zero"}
     poly.get_order_status.return_value = {"status": "CANCELED", "size_matched": 0}
@@ -106,6 +106,93 @@ def test_terminal_zero_match_stays_a_miss(monkeypatch, tmp_path):
         )
 
     assert result is None
+    assert eng.entry_unconfirmed is False
+
+
+def test_malformed_size_matched_after_cancel_does_not_raise(monkeypatch, tmp_path):
+    """V2 returns size_matched as a string; an empty/garbage value must not
+    raise out of the round (an unhandled error drops a real fill -> re-post)."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-bad"}
+    poly.get_order_status.return_value = {"status": "CANCELED", "size_matched": "abc"}
+
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+        )
+
+    assert result is None  # empty string -> treated as zero, not an exception
+
+
+def test_string_typed_fill_after_cancel_is_parsed(monkeypatch, tmp_path):
+    """A real fill reported with string-typed fields still books."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-str"}
+    poly.get_order_status.return_value = {
+        "status": "CANCELED", "price": "0.50", "size_matched": "3",
+    }
+
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+        )
+
+    assert result == (0.50, 3.0, "ord-str")
+
+
+def test_transient_none_then_fill_is_captured(monkeypatch, tmp_path):
+    """A status read that hiccups (None) on the first poll then shows the fill
+    must NOT be abandoned as a miss -- retry across the budget."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-hiccup"}
+    poly.get_order_status.side_effect = [
+        None,                                                        # hiccup
+        {"status": "CANCELED", "price": 0.52, "size_matched": 4.0},  # fill
+    ]
+
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+        )
+
+    assert result == (0.52, 4.0, "ord-hiccup")
+    assert eng.entry_unconfirmed is False
+
+
+def test_persistently_unreadable_status_flags_unconfirmed(monkeypatch, tmp_path):
+    """If the order's fate can't be read after cancel (every poll None), we
+    cannot rule out a fill -> fail safe: entry_unconfirmed is set so the
+    strategy blocks further entries this window (no re-post into a stack)."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-dark"}
+    poly.get_order_status.return_value = None
+
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+        )
+
+    assert result is None
+    assert eng.entry_unconfirmed is True
+
+
+def test_terminal_zero_then_late_fill_is_captured(monkeypatch, tmp_path):
+    """A terminal status can race ahead of size_matched: CANCELED with 0 on the
+    first read, the match surfacing on the next. Must not break on the first
+    terminal-zero read."""
+    eng, poly = _engine(monkeypatch, tmp_path, gtc_timeout_sec=0)
+    poly.place_order.return_value = {"orderID": "ord-late"}
+    poly.get_order_status.side_effect = [
+        {"status": "CANCELED", "size_matched": 0},                   # terminal, stale
+        {"status": "CANCELED", "price": 0.52, "size_matched": 2.0},  # match surfaced
+    ]
+
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(
+            eng._execute_gtc("0xTOK", 0.52, 2.08, 180.0, spread=0.02)
+        )
+
+    assert result == (0.52, 2.0, "ord-late")
 
 
 # ── Change 2: per-window side lock ────────────────────────────────────────
@@ -161,15 +248,95 @@ def _bridge_skeleton(executor) -> ContrarianEvStrategy:
     s._has_position = False
     s._last_trade_msg = ""
     s._window_side = None
+    s._entry_blocked_unknown = False
+    s._current_window_slug = ""
+    s._entry_task_window = ""
     return s
 
 
 class _FakeLiveExecutor:
     is_paper = False
 
+    def __init__(self, result=None, entry_unconfirmed=False):
+        self._result = result
+        self.entry_unconfirmed = entry_unconfirmed
+
     async def execute_trade(self, **kwargs):
         await asyncio.sleep(0)
-        return None
+        return self._result
+
+
+def _fake_trade(side="YES"):
+    t = MagicMock()
+    t.side = side
+    t.entry_price = 0.52
+    t.size_usdc = 2.08
+    return t
+
+
+def test_unconfirmed_round_blocks_further_entries_this_window():
+    """A round that came back unconfirmed (engine.entry_unconfirmed) must set
+    the strategy's window-level entry block (fail-safe, no re-post)."""
+    s = _bridge_skeleton(_FakeLiveExecutor(result=None, entry_unconfirmed=True))
+
+    async def scenario():
+        s._submit_entry(side="YES", price=0.52, size_usdc=2.08, market_slug="w1")
+        await s._entry_task
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert s._entry_blocked_unknown is True
+
+
+def test_entry_unconfirmed_filter_blocks_all_entries():
+    """Once the window is flagged unconfirmed, the entry filter blocks any
+    side (not just the opposite one)."""
+    s = ContrarianEvStrategy("t", {})
+    s._entry_blocked_unknown = True
+    assert "entry_unconfirmed" in s._apply_entry_filters(
+        _decision("YES"), secs_remaining=200.0
+    )
+    assert "entry_unconfirmed" in s._apply_entry_filters(
+        _decision("NO"), secs_remaining=200.0
+    )
+
+
+def test_new_window_clears_the_unconfirmed_block():
+    s = ContrarianEvStrategy("t", {})
+    s._entry_blocked_unknown = True
+    s.on_new_window(MagicMock())
+    assert s._entry_blocked_unknown is False
+
+
+def test_fill_for_a_prior_window_is_not_booked_into_the_current_window():
+    """A round launched in window w1 that only drains during w2 must NOT be
+    booked into w2's state (cross-window straddle), and must block w2 entries
+    so we don't stack while the straddle is unresolved."""
+    s = _bridge_skeleton(_FakeLiveExecutor(result=_fake_trade("YES")))
+    s._current_window_slug = "w2"
+
+    async def scenario():
+        s._submit_entry(side="YES", price=0.52, size_usdc=2.08, market_slug="w1")
+        await s._entry_task
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert s._has_position is False
+    assert s._entry_blocked_unknown is True
+
+
+def test_fill_for_the_current_window_books_normally():
+    s = _bridge_skeleton(_FakeLiveExecutor(result=_fake_trade("YES")))
+    s._current_window_slug = "w1"
+
+    async def scenario():
+        s._submit_entry(side="YES", price=0.52, size_usdc=2.08, market_slug="w1")
+        await s._entry_task
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert s._has_position is True
+    assert s._entry_blocked_unknown is False
 
 
 def test_first_submission_locks_the_window_side():
