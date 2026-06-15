@@ -175,7 +175,12 @@ class TestEarlyExitFee:
         trade.db_id = None
         eng.pending_trade = trade
         eng.pending_token_id = "0xTOK"
-        with patch("core.execution.asyncio.sleep", new=AsyncMock()):
+        # HALT-independent: this asserts the fee contract on a real flatten,
+        # not halt behaviour. Without this the test fails whenever a live
+        # data_runtime/HALT exists (close_position_early defers to the kill
+        # switch when halted) -- which is exactly when the bot is halted.
+        with patch("core.execution.asyncio.sleep", new=AsyncMock()), \
+             patch("core.execution.halt_active", return_value=False):
             result = asyncio.run(
                 eng.close_position_early(exit_price=0.45, reason="t")
             )

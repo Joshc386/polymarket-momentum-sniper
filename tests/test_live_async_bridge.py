@@ -24,6 +24,7 @@ def _skeleton(executor) -> ContrarianEvStrategy:
     s._exit_in_flight = False
     s._entry_task = None
     s._has_position = False
+    s._window_side = None
     s._last_trade_msg = ""
     return s
 

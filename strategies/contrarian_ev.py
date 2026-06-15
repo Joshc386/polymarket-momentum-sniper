@@ -325,7 +325,7 @@ class ContrarianEvStrategy:
         # Track how often each filter fires (for dashboard/diagnostics)
         self._filter_skipped = {
             "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
-            "high_ev_early": 0, "l1_against_line": 0,
+            "high_ev_early": 0, "l1_against_line": 0, "side_locked": 0,
         }
 
         # Per-tick signal diagnostic logger (off by default; enable in config
@@ -421,6 +421,10 @@ class ContrarianEvStrategy:
 
         # Per-window state
         self._has_position = False
+        # Side committed by the first order placed this window. Locks out the
+        # opposite side for the rest of the window so a mid-window signal flip
+        # can't open an opposite-side position (multi-entry bug 2026-06-15).
+        self._window_side: str | None = None
         self._entry_decision = EntryDecision()
         self._last_trade_msg = ""
 
@@ -449,6 +453,7 @@ class ContrarianEvStrategy:
     def on_new_window(self, snapshot: DataSnapshot) -> None:
         """Reset per-window state."""
         self._has_position = False
+        self._window_side = None
         self._entry_decision = EntryDecision()
         self._orderbook.reset()
         self._orderbook_fade.reset()
@@ -1131,6 +1136,17 @@ class ContrarianEvStrategy:
             size. Prevents walking the book on thin markets. At $5 stakes
             this rarely fires; becomes important when sizing up.
         """
+        # Per-window side lock: once this window has placed an order, only the
+        # committed side may re-post. A mid-window signal flip must NOT open an
+        # opposite-side position (multi-entry bug 2026-06-15). This is the
+        # safety invariant, checked first.
+        if self._window_side and decision.side != self._window_side:
+            self._filter_skipped["side_locked"] += 1
+            return (
+                f"side_locked: window committed to {self._window_side}, "
+                f"refusing {decision.side}"
+            )
+
         # Directional L1 floor: never bet against the window-open line
         # (beyond the deadband). YES needs L1 >= -deadband, NO needs
         # L1 <= +deadband. Opt-in; default off keeps Bot G/K unchanged.
@@ -1326,6 +1342,15 @@ class ContrarianEvStrategy:
 
     # ── Live/paper execution bridge (ADR-0003) ────────────────────────
 
+    def _lock_window_side(self, side) -> None:
+        """Commit the window to a side on its first placement (idempotent).
+
+        Once set, ``_apply_entry_filters`` blocks the opposite side for the
+        rest of the window. A later round on a different side never relocks.
+        """
+        if self._window_side is None and side:
+            self._window_side = side
+
     def _submit_entry(self, **kwargs):
         """Dispatch an entry to the executor.
 
@@ -1336,9 +1361,11 @@ class ContrarianEvStrategy:
         advances the re-post loop.
         """
         if self._executor.is_paper:
+            self._lock_window_side(kwargs.get("side"))
             return self._executor.execute_trade(**kwargs)
         if self._entry_in_flight:
             return None
+        self._lock_window_side(kwargs.get("side"))
         self._entry_in_flight = True
         self._entry_task = asyncio.get_running_loop().create_task(
             self._executor.execute_trade(**kwargs)
