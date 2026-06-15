@@ -1272,6 +1272,11 @@ class ContrarianEvStrategy:
             size_usdc=bet_size,
             market_id=mkt.condition_id,
             market_slug=mkt.slug,
+            # Token ids the live engine needs to know which CTF token to buy.
+            # Paper ignores them; omitting them made every live entry fail with
+            # "No token ID for side ..." (surfaced when Bot K2 went live).
+            yes_token_id=mkt.yes_token_id,
+            no_token_id=mkt.no_token_id,
             oracle_lag_signal=self._oracle_lag_val,
             momentum_signal=self._momentum_val,
             liquidation_signal=self._liquidation_val,

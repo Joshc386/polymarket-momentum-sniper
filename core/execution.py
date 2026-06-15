@@ -258,6 +258,11 @@ class PaperExecutionEngine:
         btc_price: float,
         oracle_price: float,
         oracle_open_price: float,
+        # Accepted for interface parity with LiveExecutionEngine.execute_trade
+        # (both engines share one signature); paper simulates fills, so the
+        # token ids are unused here.
+        yes_token_id: str = "",
+        no_token_id: str = "",
         # Enriched snapshot fields
         orderbook_signal: float = 0.0,
         sentiment_signal: float = 0.0,
