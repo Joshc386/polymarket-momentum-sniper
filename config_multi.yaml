@@ -698,6 +698,10 @@ bots:
       # insurance: helps in directional regimes, can hurt in mean-reversion.
       directional_l1_floor: true
       directional_l1_floor_deadband: 0.1
+      # Live-probe side scope (ADR-0005 / J38): both sides; evaluated per-side,
+      # NO PnL/share is the primary gate, YES exploratory. Flip to NO via the
+      # adaptive guard if live YES bleeds past the inconclusive floor.
+      entry_side_filter: both
 
     regime:
       detector: mtf
@@ -753,6 +757,10 @@ bots:
       wallet_cap_usdc: 200.0
       min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
       floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
+      # Live-probe min-size mode (ADR-0005 / J38): every entry = the 5-share
+      # exchange minimum (max(5*price, $1)), bypassing the 4% ceiling and the
+      # J37 floor>ceiling skip. Sizing only — all entry/EV gates preserved.
+      flat_min_size: true
       bankroll_epoch: "2026-06-11T13:00:00+00:00"
 
     risk:
@@ -808,6 +816,7 @@ bots:
       high_ev_min_secs_into_window: 60.0
       directional_l1_floor: true
       directional_l1_floor_deadband: 0.1
+      entry_side_filter: both     # mirror of bot_k2_l1_floor (shadow = faithful clone)
 
     regime:
       detector: mtf
@@ -861,6 +870,7 @@ bots:
       wallet_cap_usdc: 200.0
       min_order_shares: 5.0        # below $200 the floor = 5*price (the exchange minimum)
       floor_at_cap_usdc: 5.0       # at/above $200 the floor is a flat $5
+      flat_min_size: true          # mirror of bot_k2_l1_floor (shadow = faithful clone)
       # Fresh epoch for the new bot_k2_shadow.db (starts empty at $100 from the
       # K2 flip). Safe to leave — a fresh DB has no trades before this anyway.
       bankroll_epoch: "2026-06-13T00:00:00+00:00"

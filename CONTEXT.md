@@ -147,15 +147,52 @@ regime** (>60s remaining); below the 60s entry floor the bot does not enter.
   final order state is queried once and any size_matched becomes a real
   recorded trade.
 
-### T1 go-live probe (Bot K2) — pass/abort vocabulary (J34)
+### T1 go-live probe (Bot K2) — pass/abort vocabulary (J34, revised J38)
 The bounded-loss live fill probe. Its job is to *measure the live fill gap
-paper can't simulate* on the cheap-side fade, for a capped tuition.
+paper can't simulate*, for a capped tuition. **Revised to a flat min-size,
+both-sides, PnL/share-gated probe** after the J37 clean-data edge analysis.
+- **Sizing — flat min-size mode** — every entry is the **5-share exchange
+  minimum** (`max(5×price, $1)`), *bypassing* the 4% Kelly ceiling and the
+  J37 floor>ceiling **skip** (which starved the small wallet into ≤$0.40 losers).
+  A config-toggled mode on `PositionSizer` (`strategy/sizing.py`); the existing
+  wallet-proportional sizing stays intact and is the default for every other bot.
+  Rationale: a fixed min size removes the floor>ceiling rejection, lets the live
+  bot trade the **full price range** like the shadow at **minimal capital risk** —
+  a fair, cheap live-edge probe that isolates *edge × execution*, not *sizing*.
+- **Side scope — both sides, evaluated per-side** — the probe trades **NO and
+  YES** (YES is *not* unprofitable: it was −0.9c at ask but **+2–3c/share under
+  the bot's actual maker fills** — the loss was a fill-at-ask artifact). Every
+  trade records `side`, so the run is sliced per-side: **NO PnL/share is the
+  primary go/no-go** (the robust leg, +3.6–4.4c); **YES PnL/share is an
+  exploratory secondary read** (does its more fill-fragile, maker-discount-
+  dependent edge survive live?). A marginal YES cannot sink the verdict.
+  **Adaptive guard:** if live YES PnL/share is persistently negative past the
+  inconclusive floor (~50+ YES fills), flip to NO-only via `entry_side_filter`
+  and revisit YES later — data-triggered, not pre-decided. Implemented as
+  `entry_side_filter: both | NO | YES` (default `both`; other bots untouched);
+  the **shadow mirrors live** (both sides) so the fill-gap is measured per-leg.
 - **Loss budget** — the existing 30% drawdown breaker (~−$30 from peak on the
-  ~$100 wallet) is the tuition cap. No separate manual money line.
-- **Duration** — pure calendar: read-out at ~2 weeks, hard end at ~3 weeks.
-- **Success / T2 gate** — K2-**live** filled WR ≥ K2-**shadow** paper WR − 5pp on
-  matched windows, valid only above a **30 filled-trade** floor (else
-  *inconclusive*, not a pass). Live PnL/trade is a sanity flag, not a gate.
+  ~$100 wallet) is the tuition cap. No separate manual money line. (At min size,
+  ~$2.50/trade, this is many trades of runway — the calendar/fill-count bar binds
+  before the loss budget does in the expected-positive case.)
+- **Duration** — run to **statistical significance, not a fixed calendar**. The
+  thin (~4c/share) edge against ~±50c/share variance needs **~150–600 fills**
+  for a ~2σ read; at ~35–55 NO fills/day that is ~the ~2–3-week window, but the
+  bar is the **fill count / t-stat, not the date**. First read-out at ~2 weeks;
+  extend toward 3+ weeks if the t-stat hasn't resolved. Bounded throughout by the
+  loss budget.
+- **Success / T2 gate** — **PnL/share basis** (revised: the WR gate was retired
+  after the J37 clean-data analysis showed K2 paper was 49% WR yet +PnL — WR
+  collapses the asymmetric-payoff edge). The probe passes when **live filled
+  PnL/share > 0** over the run, read as a real signal (not a raw sign over a
+  handful of trades — see the sample-size note below). The **shadow comparison**
+  (live filled PnL/share vs K2-shadow paper PnL/share) is retained as the
+  *diagnostic* that isolates the execution/fill gap from edge decay. **WR is
+  demoted to a secondary sanity flag.** Even a 20%-WR run is a *pass* if
+  PnL/share is positive. **Significance, two-tier (day-clustered t, not
+  per-trade — intraday trades share regime):** t ≳ **1.5** = pass / continue &
+  scale cautiously; t ≥ **2** = commit more capital. The **30 filled-trade**
+  floor is now only the "too-early-to-read / inconclusive" line, never a pass.
 - **Abort triggers** (any → pull K2 to paper, reassess) — adverse-selection
   signature early, operational integrity breach, near-zero fill rate, live
   PnL/trade materially below shadow.

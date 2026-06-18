@@ -246,6 +246,7 @@ class ContrarianEvStrategy:
             wallet_cap_usdc=sizing_cfg.get("wallet_cap_usdc", 200.0),
             min_order_shares=sizing_cfg.get("min_order_shares", 5.0),
             floor_at_cap_usdc=sizing_cfg.get("floor_at_cap_usdc", 5.0),
+            flat_min_size=sizing_cfg.get("flat_min_size", False),
         )
 
         risk_cfg = cfg.get("risk", {})
@@ -321,12 +322,17 @@ class ContrarianEvStrategy:
         self._directional_l1_floor_deadband = filter_cfg.get(
             "directional_l1_floor_deadband", 0.1
         )
+        # Entry side filter (added 2026-06-18, ADR-0005). Restrict the live
+        # probe to one side: "both" (default, every other bot unchanged), "NO"
+        # or "YES". When set, the opposite side's entries are blocked. The
+        # adaptive guard flips this to NO-only if live YES bleeds.
+        self._entry_side_filter = filter_cfg.get("entry_side_filter", "both")
         self._last_orderbook = None  # stored each tick for filter access
         # Track how often each filter fires (for dashboard/diagnostics)
         self._filter_skipped = {
             "yes_low_price": 0, "regime": 0, "low_liquidity": 0,
             "high_ev_early": 0, "l1_against_line": 0, "side_locked": 0,
-            "entry_unconfirmed": 0,
+            "entry_unconfirmed": 0, "side_filter": 0,
         }
 
         # Per-tick signal diagnostic logger (off by default; enable in config
@@ -1170,6 +1176,17 @@ class ContrarianEvStrategy:
             self._filter_skipped["side_locked"] += 1
             return (
                 f"side_locked: window committed to {self._window_side}, "
+                f"refusing {decision.side}"
+            )
+
+        # Entry side filter (ADR-0005): restrict the live probe to one side.
+        # "both" (default) never blocks; the adaptive guard flips this to
+        # NO-only if live YES bleeds. Pure config scope gate.
+        if (self._entry_side_filter in ("NO", "YES")
+                and decision.side != self._entry_side_filter):
+            self._filter_skipped["side_filter"] += 1
+            return (
+                f"side_filter: probe restricted to {self._entry_side_filter}, "
                 f"refusing {decision.side}"
             )
 

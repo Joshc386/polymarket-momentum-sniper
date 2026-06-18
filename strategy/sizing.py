@@ -47,6 +47,7 @@ class PositionSizer:
         wallet_cap_usdc: float = 200.0,
         min_order_shares: float = 5.0,
         floor_at_cap_usdc: float = 5.0,
+        flat_min_size: bool = False,
     ):
         self.kelly_multiplier = kelly_multiplier
         self.min_bet_usdc = min_bet_usdc
@@ -57,6 +58,7 @@ class PositionSizer:
         self.wallet_cap_usdc = wallet_cap_usdc
         self.min_order_shares = min_order_shares
         self.floor_at_cap_usdc = floor_at_cap_usdc
+        self.flat_min_size = flat_min_size
 
     def compute(
         self,
@@ -94,6 +96,23 @@ class PositionSizer:
             return SizingDecision(0.0, 0.0, 0.0, 0.0, skipped=True)
 
         adjusted_fraction = kelly_fraction * self.kelly_multiplier * size_multiplier
+
+        if self.flat_min_size:
+            # Live-probe sizing (ADR-0005): always the dynamic exchange minimum,
+            # bypassing the 4% ceiling and the floor>ceiling skip. Sizing only —
+            # the EV/validity gates above are already applied.
+            if size_multiplier <= 0:
+                # Streak HALT (or any external stop) -> no trade. Size reduction
+                # is a no-op at min size, but a halt still stops trading.
+                return SizingDecision(0.0, 0.0, 0.0, 0.0, skipped=True)
+            floor = max(self.min_order_shares * share_price, EXCHANGE_MIN_USDC)
+            raw = adjusted_fraction * bankroll
+            if floor > bankroll:
+                # Wallet too small for a compliant min order — skip, never
+                # place an unaffordable order.
+                return SizingDecision(0.0, raw, floor, floor, skipped=True)
+            return SizingDecision(round(floor, 2), raw, floor, floor,
+                                  bumped=raw < floor)
 
         if self.wallet_proportional:
             # Bets are proportional to the capped sizing wallet; above the
