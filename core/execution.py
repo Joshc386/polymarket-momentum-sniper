@@ -988,6 +988,28 @@ class LiveExecutionEngine:
                 break
 
         if sold <= 0:
+            # [DEBUG-sell0] TEMP diagnostic (remove once root-caused): live SELLs
+            # fail with "balance:0" despite CTF approval being set (verified
+            # on-chain) on a non-negrisk market. Read the on-chain CTF balance
+            # for the token we believe we hold -- >0 means settlement/CLOB lag
+            # (held but not yet sellable); 0 means a held/sold mismatch. Wrapped
+            # so the probe can never affect the exit path.
+            try:
+                from core.ctf_balances import get_ctf_balances
+                funder = getattr(
+                    getattr(self.poly, "config", None),
+                    "polymarket_funder_address", "",
+                ) or ""
+                bals = await get_ctf_balances(funder, [token_id])
+                onchain = bals[0]["size"] if bals else 0.0
+                logger.warning(
+                    f"[DEBUG-sell0] SELL-failed probe: believed {trade.side} "
+                    f"{trade.num_shares:.2f}sh of {str(token_id)[:14]}, on-chain "
+                    f"CTF balance={onchain:.4f} (>0 => settlement/CLOB lag; "
+                    f"0 => phantom/wrong-token)"
+                )
+            except Exception as e:  # never let the probe affect trading
+                logger.warning(f"[DEBUG-sell0] on-chain probe failed: {e}")
             logger.warning(
                 f"[LIVE] Early exit ({reason}) UNFILLED after "
                 f"{self.EXIT_MAX_ATTEMPTS} attempts -- position rides to "

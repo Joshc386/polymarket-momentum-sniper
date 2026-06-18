@@ -92,7 +92,8 @@ def test_unfilled_exit_rides_to_resolution_with_no_ledger_change():
     poly.get_order_status.return_value = {"status": "LIVE", "size_matched": 0}
 
     with patch("core.execution.asyncio.sleep", new=AsyncMock()), \
-         patch("core.execution.halt_active", return_value=False):
+         patch("core.execution.halt_active", return_value=False), \
+         patch("core.ctf_balances.get_ctf_balances", new=AsyncMock(return_value=[])):
         out = asyncio.run(
             eng.close_position_early(exit_price=0.55, reason="btc_stop_$90")
         )
@@ -105,6 +106,31 @@ def test_unfilled_exit_rides_to_resolution_with_no_ledger_change():
              if c.kwargs.get("side") == "SELL"]
     assert [round(s["price"], 2) for s in sells] == [0.54, 0.53, 0.52]
     assert poly.cancel_order.await_count == 3  # every remainder cancelled
+
+
+def test_unfilled_exit_probes_onchain_ctf_balance():
+    """[DEBUG-sell0] On a fully-unfilled exit (the live balance:0 failure mode),
+    the diagnostic probe reads the on-chain CTF balance for the token we believe
+    we hold -- to distinguish settlement lag (>0, not yet sellable) from a
+    held/sold mismatch (0). Read-only; never affects the exit outcome."""
+    eng, poly, trade, bankroll0 = _engine_with_position()
+    poly.config = MagicMock()
+    poly.config.polymarket_funder_address = "0xFUNDER"
+    poly.place_order.return_value = {"orderID": "ord-exit"}
+    poly.get_order_status.return_value = {"status": "LIVE", "size_matched": 0}
+
+    probe = AsyncMock(return_value=[{"token_id": "0xYES", "size": 4.0, "condition_id": ""}])
+    with patch("core.execution.asyncio.sleep", new=AsyncMock()), \
+         patch("core.execution.halt_active", return_value=False), \
+         patch("core.ctf_balances.get_ctf_balances", probe):
+        out = asyncio.run(
+            eng.close_position_early(exit_price=0.55, reason="btc_stop_$90")
+        )
+
+    assert out is None                      # still rides to resolution
+    probe.assert_awaited_once()
+    assert probe.await_args.args[0] == "0xFUNDER"   # queried the funder
+    assert probe.await_args.args[1] == ["0xYES"]    # for the believed token
 
 
 def test_partial_exit_splits_the_record(monkeypatch):
