@@ -107,12 +107,19 @@ class PositionSizer:
                 return SizingDecision(0.0, 0.0, 0.0, 0.0, skipped=True)
             floor = max(self.min_order_shares * share_price, EXCHANGE_MIN_USDC)
             raw = adjusted_fraction * bankroll
-            if floor > bankroll:
+            size = round(floor, 2)
+            # Float round-trip safety: the live executor re-derives shares as
+            # size/price and rejects size/price < min_order_shares. round(5*p, 2)
+            # underflows to 4.999... at ~10% of penny prices (0.46, 0.56, ...),
+            # which would silently skip those prices and bias the probe sample.
+            # Bump one cent so the order clears the exchange minimum.
+            if size / share_price < self.min_order_shares:
+                size = round(size + 0.01, 2)
+            if size > bankroll:
                 # Wallet too small for a compliant min order — skip, never
                 # place an unaffordable order.
                 return SizingDecision(0.0, raw, floor, floor, skipped=True)
-            return SizingDecision(round(floor, 2), raw, floor, floor,
-                                  bumped=raw < floor)
+            return SizingDecision(size, raw, floor, floor, bumped=raw < floor)
 
         if self.wallet_proportional:
             # Bets are proportional to the capped sizing wallet; above the

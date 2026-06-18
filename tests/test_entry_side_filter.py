@@ -6,6 +6,8 @@ bleeds). `entry_side_filter: both | NO | YES` (default both → every other bot
 unchanged). When set, the opposite side's entries are blocked.
 """
 
+import pytest
+
 from strategies.contrarian_ev import ContrarianEvStrategy
 from strategy.entry_logic import EntryDecision
 
@@ -40,5 +42,19 @@ def test_both_blocks_neither_side() -> None:
 
 
 def test_config_wiring_default_and_override() -> None:
-    assert ContrarianEvStrategy("t", {})._entry_side_filter == "both"
+    assert ContrarianEvStrategy("t", {})._entry_side_filter == "BOTH"
     assert _strategy("NO")._entry_side_filter == "NO"
+
+
+def test_side_filter_normalizes_case() -> None:
+    # A lowercase config value must not silently fail open to both sides.
+    s = ContrarianEvStrategy("t", {"filters": {"entry_side_filter": "no"}})
+    assert s._entry_side_filter == "NO"
+    assert "side_filter" in s._apply_entry_filters(_decision("YES"), secs_remaining=200.0)
+
+
+def test_side_filter_rejects_unknown_value() -> None:
+    # Fail-fast at construction — a typo must not become "trade both sides
+    # with real money" on a live-capital probe.
+    with pytest.raises(ValueError):
+        ContrarianEvStrategy("t", {"filters": {"entry_side_filter": "sell"}})

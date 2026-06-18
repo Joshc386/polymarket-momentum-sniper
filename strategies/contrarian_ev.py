@@ -326,7 +326,16 @@ class ContrarianEvStrategy:
         # probe to one side: "both" (default, every other bot unchanged), "NO"
         # or "YES". When set, the opposite side's entries are blocked. The
         # adaptive guard flips this to NO-only if live YES bleeds.
-        self._entry_side_filter = filter_cfg.get("entry_side_filter", "both")
+        # Normalize + validate (fail-fast): a malformed value must NOT silently
+        # fail open to trading both sides with real capital.
+        self._entry_side_filter = str(
+            filter_cfg.get("entry_side_filter", "both")
+        ).upper()
+        if self._entry_side_filter not in ("BOTH", "NO", "YES"):
+            raise ValueError(
+                f"entry_side_filter must be both|NO|YES, got "
+                f"{filter_cfg.get('entry_side_filter')!r}"
+            )
         self._last_orderbook = None  # stored each tick for filter access
         # Track how often each filter fires (for dashboard/diagnostics)
         self._filter_skipped = {

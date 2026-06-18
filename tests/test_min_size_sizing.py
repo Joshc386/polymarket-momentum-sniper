@@ -70,6 +70,22 @@ def test_min_size_unaffected_by_streak_size_reduction() -> None:
                                 size_multiplier=0.5) == 2.5
 
 
+def test_min_size_clears_exchange_minimum_at_every_penny_price() -> None:
+    # The live executor re-derives shares as size/price and SKIPS any order
+    # where size/price < min_order_shares (execution.py below_min guard).
+    # round(5*price, 2) underflows to 4.999... in float at ~10% of penny
+    # prices (0.46, 0.56, ...). The sized order must still clear 5 shares or
+    # the probe silently never trades at those prices (price-biased sample).
+    s = make_sizer()
+    for i in range(1, 100):
+        p = i / 100
+        d = s.decide(bankroll=100.0, est_prob=min(0.99, p + 0.1), share_price=p)
+        if d.skipped:
+            continue
+        assert d.size / p >= s.min_order_shares, (
+            f"price {p}: size {d.size} -> {d.size / p} shares < {s.min_order_shares}")
+
+
 def test_strategy_wires_flat_min_size_from_config(tmp_path) -> None:
     from strategies.contrarian_ev import ContrarianEvStrategy
     s = ContrarianEvStrategy("t", {"db_path": str(tmp_path / "t.db"),
